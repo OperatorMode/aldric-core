@@ -32,7 +32,7 @@ runs regardless of what the model says about itself.
 | `05_PA_Action_Kernel.md` | `core/pa_action_kernel.py`, `core/permanent_category_scan.py` | Deterministic: Tier A/B/C classification for named tools (ALDRIC Mode), and critically, the Permanent Tier C Exceptions check, which runs first and cannot be reached by any mutation path from the API. `permanent_category_scan.py` extends the same category set to free text (used by `chat.py`, since a chat reply has no tool name to look up). LLM step (stubbed): genuine semantic surface matching — `NullSurfaceMatcher` always returns "no match," which is the *safe* default (Tier C), not a real matcher. This kernel is inert in Governance Stack Mode (`chat.py`'s mode) per the source document itself. |
 | `06_Learning_Governance.md` | `core/learning_governance.py` | Deterministic: signal-type intake rejection of non-operational-truth signal, the Correction Absolute (`apply_correction` has no confidence-gated bypass), the Structural Floor as unreachable Python constants, and — as of this rebuild — mirror-drift indicators 1 and 2 (Section 4.2): confidence climbing with zero corrections ever, and corrections tapering off over the surface's own lifetime while confirmations keep climbing (a real time-series comparison of stored timestamps, never a judgment about *why*). Partial: indicators 3 and 4 ("outputs matching approval markers", "divergence from objective outcomes") still need an outcome-tracking data model this skeleton doesn't define yet — not faked here. |
 | `07_Operator_Profiles.md` | `core/operator_profiles.py` | Intentionally NOT a governance layer, per the source document itself — calibration templates only. |
-| `08_Governance_Chain.md` | `core/governance_chain.py`, `main.py` | Deterministic: load-order verification (order-sensitive, cascading failure), and the ALDRIC-Mode-vs-Governance-Stack-Mode initialization-state rule (observation mode vs. DSD Discovery firing immediately). |
+| `08_Governance_Chain.md` | `core/governance_chain.py`, `main.py`, `core/aldric_mode.py`, `aldric_chat.py` | Deterministic: load-order verification (order-sensitive, cascading failure), and the ALDRIC-Mode-vs-Governance-Stack-Mode initialization-state rule (observation mode vs. DSD Discovery firing immediately) — as of this rebuild's ALDRIC Mode entrypoint, that rule is real rather than descriptive: `core/aldric_mode.py`'s `requires_escalation()` is the one deterministic gate deciding whether a casual turn must escalate into a locked DSD, built from the same self-report-plus-scan discipline `llm/governed_reply.py` already uses, shared via `core/pa_action_kernel.py`'s `effective_tool_tier()` so the two modes' tool-call escalation logic cannot drift apart. LLM step: `llm/aldric_reply.py` runs the actual casual conversational turn. |
 
 ## What's built and tested
 
@@ -40,13 +40,36 @@ Run it:
 
 ```bash
 pip install -r requirements.txt
-pytest                    # 88 tests, all deterministic, no network calls
+pytest                    # 107 tests, all deterministic, no network calls
 uvicorn main:app --reload # http://127.0.0.1:8000/docs for interactive API
 
 export ANTHROPIC_API_KEY=sk-ant-...   # or Aldric-API, matching the Windows machine's existing var
-python chat.py             # actual governed conversation, terminal chat
-python webapp.py           # same governed conversation, browser UI at http://127.0.0.1:8000
+python aldric_chat.py     # ALDRIC Mode — casual chat, no DSD until something needs one, terminal
+python chat.py             # Governance Stack Mode — DSD required upfront, terminal chat
+python webapp.py           # Governance Stack Mode, browser UI at http://127.0.0.1:8000
 ```
+
+## Using ALDRIC Mode (`aldric_chat.py`)
+
+This is the entrypoint README gap-list item 5 used to describe as missing.
+Run `python aldric_chat.py` and just talk — no interview, no locked Decision
+Surface, exactly like an ordinary chat session. Every turn's reply is
+checked, deterministically, against `core/aldric_mode.py`'s
+`requires_escalation()`: the model's own self-reported scope/categories are
+a soft signal only, the same permanent-category scanner Governance Stack
+Mode already uses runs over the actual reply text (and any proposed tool
+call's arguments), and that scan is authoritative — under-reporting a
+pricing or contractual commitment doesn't make it casual. The moment a turn
+fires that gate, the script says so out loud (never silently), then hands
+off into `chat.py`'s own DSD Discovery Loop (seeded with the casual
+conversation so far, so you don't repeat yourself) and, once locked, `chat.py`'s
+own governed session — the identical Adjudication Buffer, KSP Finality, and
+APEX drift check `chat.py` and `webapp.py` already use, not a second
+implementation of any of it. Escalation is one-directional for the session:
+once a Decision Surface locks, the rest of that session stays in Governance
+Stack Mode. Start a new session for a fresh casual conversation. Not yet
+wired into `webapp.py`'s browser UI — that's the natural next step once this
+terminal version has seen real use.
 
 ## Using the browser UI (`webapp.py`)
 
@@ -170,12 +193,17 @@ This is a governance *kernel*, not a finished ALDRIC. To go further:
    guessing at what Structural Projection/Validation/Integrity Gate/
    Compaction concretely check for, which is exactly the "theater dressed
    as rigor" this project exists to avoid.
-5. **ALDRIC Mode itself.** Everything built so far is either mode-agnostic
-   core or specifically wired for Governance Stack Mode (`chat.py`). Actual
-   autonomous operation — triggers arriving without the operator present,
-   surfaces accumulating confidence over time, the Daily Digest as a
-   standing artifact rather than an on-demand command — is Phase 4+ territory
-   and needs its own entrypoint, not `chat.py`.
+5. ~~ALDRIC Mode itself.~~ **Half-done.** The adaptive entrypoint —
+   casual conversation with no DSD upfront, escalating into Governance Stack
+   Mode only when a turn actually needs it — is built and tested
+   (`core/aldric_mode.py`, `llm/aldric_reply.py`, `aldric_chat.py`; see
+   "Using ALDRIC Mode" above). What's still genuinely Phase 4+ territory and
+   not attempted here: fully autonomous operation with triggers arriving
+   without the operator present, surfaces accumulating confidence over time
+   (blocked on the real surface matcher below), and the Daily Digest as a
+   standing artifact rather than an on-demand command. Also not yet done:
+   wiring this same casual/escalation flow into `webapp.py`'s browser UI —
+   right now it's terminal-only.
 6. **Persistence beyond SQLite.** `storage/db.py` is plain relational SQLite.
    The project's own tech-stack reference lists `sqlite-vec` as a Phase 6+
    concern (semantic memory recall) — deliberately not pulled forward here.
