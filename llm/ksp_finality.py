@@ -70,7 +70,9 @@ entries just to fill a field."""
 
 def project_structure(dsd: DecisionSurfaceDocument, candidate_claim: str) -> StructuralProjection:
     user_message = f"Decision Surface:\n{_dsd_context(dsd)}\n\nCandidate claim:\n{candidate_claim}"
-    raw = complete(system=_PROJECTION_SYSTEM, user_message=user_message, model=SIDECAR_MODEL, max_tokens=500)
+    # See llm/dsd_interview.py for why these budgets across this file were
+    # raised from their original "no thinking" sizes.
+    raw = complete(system=_PROJECTION_SYSTEM, user_message=user_message, model=SIDECAR_MODEL, max_tokens=1200)
     parsed = json.loads(strip_json_code_fence(raw))
     return StructuralProjection(
         actors=list(parsed.get("actors", [])),
@@ -118,7 +120,7 @@ def run_validation_thread(
         f"invariants: {projection.invariants}, unknowns: {projection.unknowns}\n\n"
         f"Candidate claim:\n{candidate_claim}"
     )
-    raw = complete(system=_thread_system(thread), user_message=user_message, model=SIDECAR_MODEL, max_tokens=300)
+    raw = complete(system=_thread_system(thread), user_message=user_message, model=SIDECAR_MODEL, max_tokens=800)
     parsed = json.loads(strip_json_code_fence(raw))
     return ValidationThreadResult(
         thread=thread,
@@ -162,7 +164,7 @@ def audit_integrity(
         f"Validation Threads: {thread_summary}\n\n"
         f"Candidate claim:\n{candidate_claim}"
     )
-    raw = complete(system=_INTEGRITY_SYSTEM, user_message=user_message, model=SIDECAR_MODEL, max_tokens=400)
+    raw = complete(system=_INTEGRITY_SYSTEM, user_message=user_message, model=SIDECAR_MODEL, max_tokens=1000)
     parsed = json.loads(strip_json_code_fence(raw))
     return IntegrityGateResult(
         keystone_stable=bool(parsed.get("keystone_stable", False)),
@@ -208,7 +210,7 @@ def compact(
         f"domain_closure_ok={integrity.domain_closure_ok} ({integrity.rationale})\n\n"
         f"Candidate claim:\n{candidate_claim}"
     )
-    raw = complete(system=_COMPACTION_SYSTEM, user_message=user_message, model=DEFAULT_MODEL, max_tokens=1200)
+    raw = complete(system=_COMPACTION_SYSTEM, user_message=user_message, model=DEFAULT_MODEL, max_tokens=3000)
     parsed = json.loads(strip_json_code_fence(raw))
     audit = [
         UnknownAuditFinding(unknown=f.get("unknown", ""), resolved=bool(f.get("resolved", False)))

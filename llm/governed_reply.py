@@ -166,7 +166,10 @@ def run_governed_turn(
     )
     transcript = "\n".join(f"{t['role']}: {t['content']}" for t in conversation)
     full_user_message = f"{transcript}\nuser: {user_message}" if transcript else user_message
-    raw = complete(system=system, user_message=full_user_message, model=DEFAULT_MODEL, max_tokens=1500)
+    # See llm/dsd_interview.py's run_interview_step for why this is higher
+    # than the "no thinking" size it was originally written for: max_tokens
+    # caps thinking + text together, and DEFAULT_MODEL thinks by default.
+    raw = complete(system=system, user_message=full_user_message, model=DEFAULT_MODEL, max_tokens=4000)
 
     try:
         parsed = json.loads(strip_json_code_fence(raw))

@@ -70,7 +70,12 @@ def run_interview_step(conversation: list[dict[str, str]]) -> dict:
         # it only prompts the model to produce its opening Reason Anchor +
         # Open Question per the system prompt above.
         transcript = "(Discovery Loop start — no operator input yet. Ask your opening question.)"
-    raw = complete(system=_SYSTEM_PROMPT, user_message=transcript, model=DEFAULT_MODEL, max_tokens=500)
+    # max_tokens is a hard cap on TOTAL output — thinking tokens plus the
+    # actual text — and DEFAULT_MODEL (claude-sonnet-5) thinks by default
+    # before writing a word. 500 was sized for a "no thinking" reply and
+    # left too little room once thinking ate its share, producing
+    # truncated/invalid JSON. 2000 leaves real headroom for both.
+    raw = complete(system=_SYSTEM_PROMPT, user_message=transcript, model=DEFAULT_MODEL, max_tokens=2000)
     try:
         parsed = json.loads(strip_json_code_fence(raw))
     except json.JSONDecodeError as exc:

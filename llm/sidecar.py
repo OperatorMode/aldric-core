@@ -41,7 +41,11 @@ def detect(candidate_output: str, dsd_context: dict) -> IDSAssessment:
         f"Decision Surface context: {json.dumps(dsd_context, default=str)}\n\n"
         f"Candidate output to audit:\n{candidate_output}"
     )
-    raw = complete(system=_SIDECAR_SYSTEM_PROMPT, user_message=user_message, model=SIDECAR_MODEL, max_tokens=300)
+    # Bumped from 300 alongside the other llm/*.py call sites (see
+    # llm/dsd_interview.py) as a safety margin against the same
+    # max-tokens-too-small truncation failure mode, even though SIDECAR_MODEL
+    # (Haiku) is not on adaptive thinking by default.
+    raw = complete(system=_SIDECAR_SYSTEM_PROMPT, user_message=user_message, model=SIDECAR_MODEL, max_tokens=1024)
     try:
         parsed = json.loads(raw)
         markers = [IDSMarker(m) for m in parsed.get("markers", [])]
