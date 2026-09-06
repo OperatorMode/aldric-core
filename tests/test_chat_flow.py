@@ -139,7 +139,7 @@ def test_rejecting_a_permanent_category_artifact_never_emits_it(monkeypatch, cap
     chat.main()
     out = capsys.readouterr().out
     # Shown once, as an explicitly-labelled non-binding draft:
-    assert "[Draft output — not yet binding]" in out
+    assert "[Draft — not yet binding]" in out
     assert "Discarded." in out
     # Never shown in the emitted/final form:
     assert "ALDRIC: UNIQUE_MARKER_should_never_be_printed" not in out

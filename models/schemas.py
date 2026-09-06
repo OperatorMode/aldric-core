@@ -11,6 +11,8 @@ requested of the LLM as an instruction to follow.
 from __future__ import annotations
 
 import datetime as dt
+import hashlib
+import json
 import uuid
 from enum import Enum
 from typing import Optional
@@ -263,11 +265,59 @@ class AdjudicationStage(str, Enum):
     DEFERRED = "deferred"
 
 
+def compute_action_hash(
+    dsd_ref: str,
+    proposed_output: str,
+    proposed_tool_call: Optional[dict],
+    permanent_categories: frozenset[str],
+    tool_effective_tier: Optional["Tier"],
+) -> str:
+    """A canonical fingerprint of the exact action an AdjudicationRecord
+    adjudicates: the DSD it cites, the exact response text, the exact
+    proposed tool call (if any), which permanent categories were found, and
+    the tool's effective tier. Two calls building the identical tuple always
+    produce the same hash (json.dumps with sort_keys=True makes key order in
+    nested dicts irrelevant).
+
+    This exists for two reasons. First, `AdjudicationBuffer` recomputes it on
+    every `confirm_content()` / `authorize_emission()` call and compares
+    against the hash stored at `open()` time — proving, rather than just
+    assuming, that nothing altered the action between the two authorization
+    stages. Second, per the project's own engineering constraints: once a
+    real capability-execution layer exists, it should be told 'execute the
+    action with this exact hash', not 'the model said something that looks
+    like the authorized action, so figure out what it meant' — binding
+    execution to this fingerprint is what makes that possible later, even
+    though nothing in this codebase executes anything yet."""
+    canonical = json.dumps(
+        {
+            "dsd_ref": dsd_ref,
+            "proposed_output": proposed_output,
+            "proposed_tool_call": proposed_tool_call,
+            "permanent_categories": sorted(permanent_categories),
+            "tool_effective_tier": tool_effective_tier.value if tool_effective_tier else None,
+        },
+        sort_keys=True,
+        default=str,
+    )
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
+
+
 class AdjudicationRecord(BaseModel):
     """KSP-1 Section 3.2 — the Adjudication Buffer. No artifact is binding
     or integrated into the session record until explicitly confirmed by the
     operator. If it touches a Permanent Tier C exception, content
-    confirmation alone does not authorize emission (KSP-0 Section 9.5)."""
+    confirmation alone does not authorize emission (KSP-0 Section 9.5).
+
+    Beyond the confirmation state machine, this record carries the complete
+    proposed action itself — response text, any proposed tool call, and its
+    risk classification — not merely a truncated `summary` string. That is
+    what lets the operator-facing confirmation screen show the operator the
+    exact thing their 'confirmed' / 'send it' applies to, instead of prose
+    alone while a structured tool call rides along unseen. `action_hash` is
+    the fingerprint of that exact tuple (see `compute_action_hash`), checked
+    by `AdjudicationBuffer` at both confirmation stages so the action cannot
+    silently change between them."""
 
     adjudication_id: str = Field(default_factory=lambda: _new_id("adj"))
     dsd_ref: str  # the DSD this artifact was machined against — mandatory citation
@@ -277,3 +327,14 @@ class AdjudicationRecord(BaseModel):
     content_confirmed_at: Optional[str] = None
     emission_authorized_at: Optional[str] = None
     created_at: str = Field(default_factory=_now)
+
+    # The complete proposed action this record adjudicates. Set once at
+    # AdjudicationBuffer.open() and never touched again by confirm_content()
+    # or authorize_emission(), which only ever set stage/*_at fields above —
+    # action_hash lets that invariant be checked, not just assumed.
+    proposed_output: str = ""
+    proposed_tool_call: Optional[dict] = None
+    self_reported_scope: str = ""
+    tool_effective_tier: Optional[Tier] = None
+    permanent_categories: frozenset[str] = frozenset()
+    action_hash: str = ""

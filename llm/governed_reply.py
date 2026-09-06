@@ -13,15 +13,46 @@ UNION of that self-report with `core.permanent_category_scan`, a
 deterministic scan of the text the model actually produced. A model that
 under-reports (deliberately or by drift) does not get to suppress the scan;
 a model that over-reports just costs the operator one extra confirmation.
+
+Structured tool calls (`proposed_tool_call`) plug into `core.pa_action_kernel`
+the same way: `classify_tier()` decides a tier from tool identity + surface
+state, exactly as it does for the (still separate, autonomous-only) PA
+Action Kernel path. But an adversarial test
+(tests/test_classify_tier_adversarial.py::
+test_registered_safe_tool_can_carry_unscanned_pricing_commitment_in_arguments)
+proved that tool-identity classification alone is blind to what's actually
+in `arguments` — a tool registered as an ordinary Tier B action can still
+carry a pricing/contractual/legal commitment in its arguments text, and
+`classify_tier()` has no way to see that. So the same deterministic scan
+that covers free-form `output` text also runs over the JSON-serialized
+`arguments`, and — this is the part that must never be weakened — that
+scan is AUTHORITATIVE for escalation: if it (or self-report, or the tool's
+own registry categories) finds a permanent category, the effective tier for
+that tool call is forced to Tier C regardless of what `classify_tier()`
+concluded from tool identity and surface state alone. Escalation only ever
+raises a tier to C; nothing here is allowed to lower a tier `classify_tier()`
+already set. `NullSurfaceMatcher` still always returns "no match" (no real
+surface tracking exists in this mode yet), which by itself already forces
+every tool call to Tier C per PA Action Kernel Section 2.4 — that fail-closed
+behaviour is deliberate and must not be relaxed just to make this path feel
+more permissive.
+
+Executing a tool call is a separate, later milestone this module does not
+touch: `proposed_tool_call` is classification-and-authorization metadata
+carried on `GovernedTurnResult`, not a capability. Nothing here calls an
+external API, and nothing should, until a real capability-execution
+boundary exists.
 """
 from __future__ import annotations
 
 import json
 from dataclasses import dataclass
+from typing import Optional
 
+from core.pa_action_kernel import build_action_request, classify_tier
 from core.permanent_category_scan import scan_for_permanent_categories
 from llm.client import DEFAULT_MODEL, complete, strip_json_code_fence
-from models.schemas import DecisionSurfaceDocument, PERMANENT_TIER_C_CATEGORIES
+from models.schemas import DecisionSurfaceDocument, PERMANENT_TIER_C_CATEGORIES, Tier
 
 
 _SYSTEM_TEMPLATE = """You are ALDRIC operating in Governance Stack Mode, reasoning for the
@@ -50,11 +81,17 @@ Respond to the operator's message. Classify your own response honestly:
   Report this honestly — it is cross-checked against your actual text
   independently, so under-reporting gains nothing and just looks bad in the
   audit log.
+- "proposed_tool_call": if (and only if) you are proposing a concrete action
+  be taken on the operator's behalf (not merely discussing one), give
+  {{"tool_name": "<name>", "arguments": {{...}}}}. Otherwise set this to null.
+  This is classified and audited independently of your prose — it is not
+  executed by you saying so.
 
 Respond with ONLY this JSON:
 {{"reasoning": "<brief reasoning trace>", "output": "<your actual reply to
 the operator>", "scope": "exploration|validation|finality",
-"touched_categories": [...]}}"""
+"touched_categories": [...], "proposed_tool_call": {{"tool_name": "...",
+"arguments": {{...}}}} or null}}"""
 
 
 @dataclass
@@ -64,23 +101,52 @@ class GovernedTurnResult:
     self_reported_scope: str
     self_reported_categories: frozenset[str]
     scanned_categories: frozenset[str]
+    proposed_tool_call: Optional[dict] = None
+    # classify_tier()'s own conclusion from tool identity + surface state
+    # alone — never trusted in isolation, see tool_effective_tier below.
+    tool_identity_tier: Optional[Tier] = None
+    # Deterministic scan of the tool call's arguments text (JSON-serialized),
+    # the fix for the gap test_registered_safe_tool_can_carry_unscanned_...
+    # exposed: classify_tier() cannot see into arguments, only tool identity.
+    tool_argument_categories: frozenset[str] = frozenset()
+
+    @property
+    def all_categories(self) -> frozenset[str]:
+        return self.self_reported_categories | self.scanned_categories | self.tool_argument_categories
 
     @property
     def touches_permanent_tier_c(self) -> bool:
         return bool(self.all_categories & PERMANENT_TIER_C_CATEGORIES)
 
     @property
-    def all_categories(self) -> frozenset[str]:
-        return self.self_reported_categories | self.scanned_categories
+    def tool_effective_tier(self) -> Optional[Tier]:
+        """The tier that actually governs a proposed tool call. Escalation
+        is one-directional and authoritative: if argument-text scanning (or
+        self-report, or output-text scanning) found a permanent category
+        that classify_tier() couldn't see from tool identity alone, the
+        effective tier is forced to Tier C — full stop, regardless of what
+        classify_tier() itself concluded. This can only ever raise a tier to
+        C; nothing here is permitted to lower a tier classify_tier() already
+        set (e.g. its own fail-closed 'no surface match' -> Tier C)."""
+        if self.proposed_tool_call is None:
+            return None
+        if self.tool_identity_tier == Tier.C or self.touches_permanent_tier_c:
+            return Tier.C
+        return self.tool_identity_tier
 
     @property
     def requires_adjudication(self) -> bool:
-        """Finality-scope claims and anything touching a permanent category
-        both require the Adjudication Buffer. Ordinary exploration/
-        validation replies that don't touch a permanent category do not —
-        Scope Taxonomy (KSP-1 Section 2): 'Finality requires KSP
-        activation,' not every utterance."""
-        return self.self_reported_scope == "finality" or self.touches_permanent_tier_c
+        """Finality-scope claims, anything touching a permanent category, and
+        any proposed tool call whose effective tier is C all require the
+        Adjudication Buffer. Ordinary exploration/validation replies with no
+        tool call and no permanent category do not — Scope Taxonomy (KSP-1
+        Section 2): 'Finality requires KSP activation,' not every
+        utterance."""
+        return (
+            self.self_reported_scope == "finality"
+            or self.touches_permanent_tier_c
+            or self.tool_effective_tier == Tier.C
+        )
 
 
 def run_governed_turn(
@@ -113,10 +179,29 @@ def run_governed_turn(
     )
     scanned = scan_for_permanent_categories(output_text)
 
+    proposed_tool_call = parsed.get("proposed_tool_call") or None
+    tool_identity_tier: Optional[Tier] = None
+    tool_argument_categories: frozenset[str] = frozenset()
+    if isinstance(proposed_tool_call, dict) and proposed_tool_call.get("tool_name"):
+        arguments = proposed_tool_call.get("arguments") or {}
+        action = build_action_request(tool_name=proposed_tool_call["tool_name"], arguments=arguments)
+        # surface=None: NullSurfaceMatcher's stub is honest about not doing
+        # real surface matching yet, and PA Action Kernel 2.4 says "no
+        # match -> Tier C" for exactly this reason. Do not pass a real
+        # Surface here until real surface tracking exists in this mode.
+        decision = classify_tier(action, surface=None, drift_level=None, mirror_drift_flagged=False)
+        tool_identity_tier = decision.tier
+        tool_argument_categories = scan_for_permanent_categories(json.dumps(arguments, default=str))
+    else:
+        proposed_tool_call = None
+
     return GovernedTurnResult(
         reasoning=parsed.get("reasoning", ""),
         output_text=output_text,
         self_reported_scope=parsed.get("scope", "exploration"),
         self_reported_categories=self_reported,
         scanned_categories=scanned,
+        proposed_tool_call=proposed_tool_call,
+        tool_identity_tier=tool_identity_tier,
+        tool_argument_categories=tool_argument_categories,
     )

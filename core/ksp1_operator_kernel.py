@@ -41,8 +41,10 @@ from models.schemas import (
     AdjudicationStage,
     LoopState,
     Scope,
+    Tier,
     classify_confirmation,
     classify_emission_authorization,
+    compute_action_hash,
     ConfirmationResult,
 )
 from storage import db
@@ -157,20 +159,60 @@ class AdjudicationBuffer:
     touching a Permanent Tier C exception, content confirmation and emission
     authorization are two distinct operator actions from two distinct calls
     to this class — there is no code path where calling `confirm_content`
-    also satisfies `authorize_emission`, regardless of what text is passed."""
+    also satisfies `authorize_emission`, regardless of what text is passed.
+
+    `open()` now takes the complete proposed action (response text, any
+    proposed tool call, its effective tier, which permanent categories were
+    found, the self-reported scope) — not just a truncated `summary` string
+    — and fingerprints it with `compute_action_hash`. Both `confirm_content`
+    and `authorize_emission` recompute that fingerprint from the loaded
+    record and refuse to proceed if it doesn't match `record.action_hash`:
+    the exact action being authorized cannot silently change between the
+    two authorization stages, verified rather than merely assumed."""
 
     def __init__(self, db_path: str = db.DEFAULT_DB_PATH):
         self.db_path = db_path
 
-    def open(self, dsd_ref: str, summary: str, touches_permanent_tier_c: bool) -> AdjudicationRecord:
+    def open(
+        self,
+        dsd_ref: str,
+        summary: str,
+        touches_permanent_tier_c: bool,
+        proposed_output: str = "",
+        proposed_tool_call: Optional[dict] = None,
+        tool_effective_tier: Optional[Tier] = None,
+        permanent_categories: frozenset[str] = frozenset(),
+        self_reported_scope: str = "",
+    ) -> AdjudicationRecord:
+        action_hash = compute_action_hash(
+            dsd_ref=dsd_ref,
+            proposed_output=proposed_output,
+            proposed_tool_call=proposed_tool_call,
+            permanent_categories=permanent_categories,
+            tool_effective_tier=tool_effective_tier,
+        )
         record = AdjudicationRecord(
-            dsd_ref=dsd_ref, summary=summary, touches_permanent_tier_c=touches_permanent_tier_c
+            dsd_ref=dsd_ref,
+            summary=summary,
+            touches_permanent_tier_c=touches_permanent_tier_c,
+            proposed_output=proposed_output,
+            proposed_tool_call=proposed_tool_call,
+            tool_effective_tier=tool_effective_tier,
+            permanent_categories=permanent_categories,
+            self_reported_scope=self_reported_scope,
+            action_hash=action_hash,
         )
         db.save_adjudication(record, self.db_path)
         write_event(
             "ADJUDICATION_OPENED",
-            {"adjudication_id": record.adjudication_id, "summary": summary, "dsd_ref": dsd_ref,
-             "touches_permanent_tier_c": touches_permanent_tier_c},
+            {
+                "adjudication_id": record.adjudication_id, "summary": summary, "dsd_ref": dsd_ref,
+                "touches_permanent_tier_c": touches_permanent_tier_c,
+                "proposed_tool_call": proposed_tool_call,
+                "tool_effective_tier": tool_effective_tier.value if tool_effective_tier else None,
+                "permanent_categories": sorted(permanent_categories),
+                "action_hash": action_hash,
+            },
         )
         return record
 
@@ -180,8 +222,29 @@ class AdjudicationBuffer:
             raise AdjudicationError(f"No adjudication record {adjudication_id}")
         return AdjudicationRecord(**data)
 
+    def _assert_action_unchanged(self, record: AdjudicationRecord) -> None:
+        """Recomputes the action fingerprint from the record's own
+        action-defining fields and compares it to what was stored at
+        open()-time. A mismatch means something altered the proposed action
+        between authorization stages — refuse rather than authorize an
+        action the operator never actually saw confirmed."""
+        recomputed = compute_action_hash(
+            dsd_ref=record.dsd_ref,
+            proposed_output=record.proposed_output,
+            proposed_tool_call=record.proposed_tool_call,
+            permanent_categories=record.permanent_categories,
+            tool_effective_tier=record.tool_effective_tier,
+        )
+        if recomputed != record.action_hash:
+            raise AdjudicationError(
+                f"Adjudication {record.adjudication_id}'s action fingerprint no longer matches "
+                f"what was opened for confirmation — refusing to confirm or authorize a changed "
+                f"action. (expected {record.action_hash}, recomputed {recomputed})"
+            )
+
     def confirm_content(self, adjudication_id: str, operator_utterance: str) -> AdjudicationRecord:
         record = self._load(adjudication_id)
+        self._assert_action_unchanged(record)
         if record.stage != AdjudicationStage.PENDING_CONTENT_CONFIRMATION:
             raise AdjudicationError(
                 f"Adjudication {adjudication_id} is in stage {record.stage}, not awaiting content "
@@ -220,6 +283,7 @@ class AdjudicationBuffer:
         'confirmed — transmit' is rejected by design (see models.schemas
         docstring and the KSP-1 Section 3.2 worked example)."""
         record = self._load(adjudication_id)
+        self._assert_action_unchanged(record)
         if not record.touches_permanent_tier_c:
             raise AdjudicationError(
                 "This artifact does not touch a Permanent Tier C exception — there is no "

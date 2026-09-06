@@ -37,8 +37,10 @@ from core.pa_action_kernel import generate_daily_digest, log_digest_entry
 from llm.dsd_interview import run_interview_step
 from llm.governed_reply import run_governed_turn
 from models.schemas import (
+    AdjudicationRecord,
     ConfirmationResult,
     DSDField,
+    PERMANENT_TIER_C_CATEGORIES,
     classify_confirmation,
 )
 from storage import db
@@ -123,14 +125,61 @@ def run_dsd_discovery() -> "DecisionSurfaceDocument":  # noqa: F821 (imported be
             print("\nThat wasn't a clear yes or no in your own words — please confirm plainly (e.g. 'confirmed', 'yes').")
 
 
+def _render_adjudication(record: AdjudicationRecord) -> str:
+    """The complete proposed action the operator is being asked to confirm —
+    not just the response text. This exists because a governed turn can
+    carry a `proposed_tool_call` alongside its prose, classified and
+    (if warranted) escalated to Tier C independently of the text; before
+    this, `_handle_adjudication` only ever showed `output_text`, so an
+    operator could type 'confirmed' having seen no indication that a
+    structured tool call was attached to that turn at all. Pure function —
+    no I/O — so it's directly testable without mocking `input()`."""
+    lines = ["[Draft — not yet binding]", "", "Response:", record.proposed_output or "(empty)"]
+
+    if record.proposed_tool_call:
+        lines.append("")
+        lines.append("Proposed action:")
+        lines.append(f"  Tool: {record.proposed_tool_call.get('tool_name')}")
+        arguments = record.proposed_tool_call.get("arguments") or {}
+        if arguments:
+            lines.append("  Arguments:")
+            for key in sorted(arguments):
+                lines.append(f"    {key}: {arguments[key]}")
+        else:
+            lines.append("  Arguments: (none)")
+
+    lines.append("")
+    lines.append("Risk classification:")
+    lines.append(f"  Scope: {record.self_reported_scope or 'unknown'}")
+    if record.proposed_tool_call:
+        lines.append(
+            f"  Tool effective tier: {record.tool_effective_tier.value if record.tool_effective_tier else 'n/a'}"
+        )
+    lines.append(f"  Touches Permanent Tier C: {record.touches_permanent_tier_c}")
+    if record.permanent_categories:
+        lines.append(f"  Categories: {sorted(record.permanent_categories)}")
+    lines.append(f"  Action fingerprint: {record.action_hash[:16]}...")
+
+    return "\n".join(lines)
+
+
 def _handle_adjudication(buffer: AdjudicationBuffer, dsd_ref: str, result) -> str | None:
     """Returns the text to show the operator, or None if rejected/deferred."""
     summary = (result.output_text[:140] + "...") if len(result.output_text) > 140 else result.output_text
-    record = buffer.open(dsd_ref=dsd_ref, summary=summary, touches_permanent_tier_c=result.touches_permanent_tier_c)
+    record = buffer.open(
+        dsd_ref=dsd_ref,
+        summary=summary,
+        touches_permanent_tier_c=result.touches_permanent_tier_c,
+        proposed_output=result.output_text,
+        proposed_tool_call=result.proposed_tool_call,
+        tool_effective_tier=result.tool_effective_tier,
+        permanent_categories=result.all_categories & PERMANENT_TIER_C_CATEGORIES,
+        self_reported_scope=result.self_reported_scope,
+    )
     print(f"\n! ADJUDICATION REQUIRED — {record.summary}")
-    if result.touches_permanent_tier_c:
-        print(f"  (touches permanent categories: {sorted(result.all_categories)})")
-    print(f"\n[Draft output — not yet binding]\n{result.output_text}\n")
+    print(f"\n{_render_adjudication(record)}\n")
+    print("The confirmation below applies exactly to the proposed action shown above —")
+    print("response text and any proposed tool call together, identified by its fingerprint.")
 
     utterance = input("Confirm content? ('confirmed' / 'rejected' / 'deferred'): ")
     if utterance.strip().lower() == "rejected":
@@ -163,6 +212,8 @@ def _handle_adjudication(buffer: AdjudicationBuffer, dsd_ref: str, result) -> st
     print("\nThis touches a Permanent Tier C exception. A second, distinct authorization is")
     print("required before it is treated as final: 'send it' / 'transmit now' / 'dispatch this' /")
     print("'authorize emission'. This cannot be satisfied by repeating 'confirmed'.")
+    print(f"Authorizing emission releases exactly the action shown above — fingerprint "
+          f"{record.action_hash[:16]}... — nothing else.")
     emission_utterance = input("Authorize emission? ")
     try:
         buffer.authorize_emission(record.adjudication_id, emission_utterance)
