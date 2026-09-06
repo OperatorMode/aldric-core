@@ -23,6 +23,8 @@ import sqlite3
 from contextlib import contextmanager
 from typing import Iterator
 
+from storage import _supabase
+
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "aldric.db")
 
 SCHEMA = """
@@ -79,6 +81,10 @@ def connect(db_path: str = DEFAULT_DB_PATH) -> Iterator[sqlite3.Connection]:
 
 
 def init_db(db_path: str = DEFAULT_DB_PATH) -> None:
+    if _supabase.is_configured():
+        # Tables are provisioned directly in Supabase (see the migration
+        # applied when this was set up) — nothing to initialize locally.
+        return
     with connect(db_path) as conn:
         conn.executescript(SCHEMA)
 
@@ -149,8 +155,24 @@ def list_conflict_records(surface_id: str | None = None, db_path: str = DEFAULT_
 
 
 # --- Digest entries (append-only; digest generation marks as digested) --
+#
+# Each function below checks _supabase.is_configured() first. When
+# SUPABASE_URL/SUPABASE_KEY are set, the record goes to Supabase's Postgres
+# instead of the local SQLite file — same data, same semantics (append-only,
+# no filtering on read), different durability layer. See storage/_supabase.py.
 
 def append_digest_entry(entry, db_path: str = DEFAULT_DB_PATH) -> None:
+    if _supabase.is_configured():
+        _supabase.get_client().table("digest_entries").insert(
+            {
+                "entry_id": entry.entry_id,
+                "category": entry.category,
+                "data": json.loads(entry.model_dump_json()),
+                "created_at": entry.created_at,
+                "digested": False,
+            }
+        ).execute()
+        return
     with connect(db_path) as conn:
         conn.execute(
             "INSERT INTO digest_entries (entry_id, category, data, created_at, digested) "
@@ -162,6 +184,17 @@ def append_digest_entry(entry, db_path: str = DEFAULT_DB_PATH) -> None:
 def list_undigested_entries(db_path: str = DEFAULT_DB_PATH) -> list[dict]:
     """Everything since the last digest. No filtering — see module docstring
     and PA Action Kernel Component 7.3 (digest governance)."""
+    if _supabase.is_configured():
+        rows = (
+            _supabase.get_client()
+            .table("digest_entries")
+            .select("data")
+            .eq("digested", False)
+            .order("created_at")
+            .execute()
+            .data
+        )
+        return [r["data"] for r in rows]
     with connect(db_path) as conn:
         rows = conn.execute(
             "SELECT data FROM digest_entries WHERE digested = 0 ORDER BY created_at"
@@ -170,6 +203,11 @@ def list_undigested_entries(db_path: str = DEFAULT_DB_PATH) -> list[dict]:
 
 
 def mark_all_digested(db_path: str = DEFAULT_DB_PATH) -> None:
+    if _supabase.is_configured():
+        _supabase.get_client().table("digest_entries").update(
+            {"digested": True}
+        ).eq("digested", False).execute()
+        return
     with connect(db_path) as conn:
         conn.execute("UPDATE digest_entries SET digested = 1 WHERE digested = 0")
 
@@ -177,6 +215,20 @@ def mark_all_digested(db_path: str = DEFAULT_DB_PATH) -> None:
 # --- Adjudications --------------------------------------------------------
 
 def save_adjudication(record, db_path: str = DEFAULT_DB_PATH) -> None:
+    if _supabase.is_configured():
+        stage_value = record.stage.value if hasattr(record.stage, "value") else record.stage
+        _supabase.get_client().table("adjudications").upsert(
+            {
+                "adjudication_id": record.adjudication_id,
+                "dsd_ref": record.dsd_ref,
+                "summary": record.summary,
+                "touches_permanent_tier_c": record.touches_permanent_tier_c,
+                "stage": stage_value,
+                "data": json.loads(record.model_dump_json()),
+                "created_at": record.created_at,
+            }
+        ).execute()
+        return
     with connect(db_path) as conn:
         conn.execute(
             "INSERT OR REPLACE INTO adjudications (adjudication_id, data, created_at) "
@@ -186,6 +238,16 @@ def save_adjudication(record, db_path: str = DEFAULT_DB_PATH) -> None:
 
 
 def get_adjudication(adjudication_id: str, db_path: str = DEFAULT_DB_PATH) -> dict | None:
+    if _supabase.is_configured():
+        rows = (
+            _supabase.get_client()
+            .table("adjudications")
+            .select("data")
+            .eq("adjudication_id", adjudication_id)
+            .execute()
+            .data
+        )
+        return rows[0]["data"] if rows else None
     with connect(db_path) as conn:
         row = conn.execute(
             "SELECT data FROM adjudications WHERE adjudication_id = ?",

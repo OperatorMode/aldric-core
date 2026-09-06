@@ -33,7 +33,7 @@ import sys
 from core.apex_supervisor import HeuristicIDSDetector, apply_apex_response
 from core.ksp0_dsd import DSDGate, DSDGateError, build_dsd
 from core.ksp1_operator_kernel import AdjudicationBuffer
-from core.pa_action_kernel import generate_daily_digest
+from core.pa_action_kernel import generate_daily_digest, log_digest_entry
 from llm.dsd_interview import run_interview_step
 from llm.governed_reply import run_governed_turn
 from models.schemas import (
@@ -136,10 +136,16 @@ def _handle_adjudication(buffer: AdjudicationBuffer, dsd_ref: str, result) -> st
     if utterance.strip().lower() == "rejected":
         buffer.reject(record.adjudication_id)
         print("Discarded.")
+        log_digest_entry("held_thread", {
+            "adjudication_id": record.adjudication_id, "outcome": "rejected", "summary": record.summary,
+        })
         return None
     if utterance.strip().lower() == "deferred":
         buffer.defer(record.adjudication_id)
         print("Held. Not shown as final.")
+        log_digest_entry("held_thread", {
+            "adjudication_id": record.adjudication_id, "outcome": "deferred", "summary": record.summary,
+        })
         return None
 
     try:
@@ -149,6 +155,9 @@ def _handle_adjudication(buffer: AdjudicationBuffer, dsd_ref: str, result) -> st
         return None
 
     if not result.touches_permanent_tier_c:
+        log_digest_entry("executed_action", {
+            "adjudication_id": record.adjudication_id, "outcome": "emitted", "summary": record.summary,
+        })
         return result.output_text  # emitted immediately on single confirmation
 
     print("\nThis touches a Permanent Tier C exception. A second, distinct authorization is")
@@ -159,7 +168,15 @@ def _handle_adjudication(buffer: AdjudicationBuffer, dsd_ref: str, result) -> st
         buffer.authorize_emission(record.adjudication_id, emission_utterance)
     except Exception as exc:
         print(f"Emission not authorized: {exc}")
+        log_digest_entry("held_thread", {
+            "adjudication_id": record.adjudication_id, "outcome": "emission_not_authorized",
+            "summary": record.summary,
+        })
         return None
+    log_digest_entry("executed_action", {
+        "adjudication_id": record.adjudication_id, "outcome": "emitted", "summary": record.summary,
+        "touches_permanent_tier_c": True,
+    })
     return result.output_text
 
 
