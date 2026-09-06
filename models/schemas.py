@@ -235,6 +235,48 @@ class DigestEntry(BaseModel):
 
 
 # ---------------------------------------------------------------------------
+# Long-term memory — standing preferences and facts (not a source document
+# section on its own; this is the operator's own extension, built from what
+# an earlier prompt-based ALDRIC was observed doing in real use — see
+# core/long_term_memory.py's module docstring for the full reasoning and the
+# distinction from Learning Governance's per-Surface confidence, which is a
+# separate, still-unbuilt third memory category blocked on a real surface
+# matcher).
+# ---------------------------------------------------------------------------
+
+class StandingPreference(BaseModel):
+    """A standing rule about how to behave that should just be looked up and
+    applied, not re-decided or asked about each time — e.g. "clients get a
+    formal tone, the team gets a casual one." One active preference per
+    `scope`: setting a new preference for a scope replaces the old one
+    outright (see core.long_term_memory.set_preference), matching this
+    project's existing Correction Absolute principle (CLAUDE.md Section 7)
+    — the latest thing the operator said applies immediately and completely,
+    not gradually or resistibly."""
+
+    preference_id: str = Field(default_factory=lambda: _new_id("pref"))
+    scope: str  # a free-form tag the operator/model chooses, e.g. "client",
+                # "team", "boss", or something more specific like "client:acme"
+    content: str
+    created_at: str = Field(default_factory=_now)
+    updated_at: str = Field(default_factory=_now)
+
+
+class MemoryFact(BaseModel):
+    """A durable fact or piece of context worth remembering across sessions
+    that isn't itself a standing behavioral rule — e.g. "invoice numbers
+    start with INV-". Append-only, like ConflictRecordEntry/DigestEntry
+    above: a fact is never silently overwritten, only superseded by a newer
+    one with the same scope (both remain visible in the record)."""
+
+    fact_id: str = Field(default_factory=lambda: _new_id("fact"))
+    scope: str
+    content: str
+    source: str  # where this came from: "casual_turn", "operator_clarification", "dsd_ref:<id>", etc.
+    created_at: str = Field(default_factory=_now)
+
+
+# ---------------------------------------------------------------------------
 # KSP-1 Operator Kernel  (04_Operator_Kernel_KSP1.md)
 # ---------------------------------------------------------------------------
 

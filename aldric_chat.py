@@ -41,6 +41,7 @@ Requires ANTHROPIC_API_KEY or Aldric-API in the environment. Run:
 from __future__ import annotations
 
 import chat  # reuse Governance Stack Mode's DSD discovery + governed session loop rather than duplicating them
+import core.long_term_memory as long_term_memory
 from llm.aldric_reply import run_casual_turn
 from models.schemas import PERMANENT_TIER_C_CATEGORIES, Tier
 from storage import db
@@ -69,12 +70,29 @@ def _describe_escalation_reasons(signal) -> list[str]:
     return reasons or ["something about this turn needs a proper check-in"]
 
 
+def _announce_and_escalate(conversation: list[dict[str, str]], result) -> None:
+    """Shared by both the first attempt at a turn and the follow-up after a
+    clarification round-trip — a turn can trigger escalation either way, and
+    the announcement + handoff is identical either time. Raises _Escalate;
+    never returns normally."""
+    reasons = _describe_escalation_reasons(result.signal)
+    print("\n[ALDRIC] This has stopped being casual — " + "; ".join(reasons) + ".")
+    print("[ALDRIC] Switching to Governance Stack Mode to establish exactly what we're deciding first.\n")
+    conversation.append({"role": "assistant", "content": result.output_text})
+    raise _Escalate(conversation)
+
+
 def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None:
     """Ordinary ALDRIC Mode conversation: no DSD, no Adjudication Buffer, no
     KSP Finality — just the model's reply, checked every turn against
     core.aldric_mode.requires_escalation (via CasualTurnResult.requires_escalation).
-    Returns normally on operator exit; raises _Escalate the moment a turn
-    requires handing off to Governance Stack Mode."""
+    Also handles the memory-clarification round-trip (llm/aldric_reply.py's
+    needs_clarification): asks the model's proposed question, saves the
+    operator's answer as a standing preference so it isn't asked again, then
+    re-runs the turn with that answer so the original request actually gets
+    completed rather than just remembered for later. Returns normally on
+    operator exit; raises _Escalate the moment a turn requires handing off
+    to Governance Stack Mode."""
     conversation = conversation if conversation is not None else []
 
     print("=" * 70)
@@ -103,14 +121,39 @@ def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None
         conversation.append({"role": "user", "content": user_message})
 
         if result.requires_escalation:
-            reasons = _describe_escalation_reasons(result.signal)
-            print("\n[ALDRIC] This has stopped being casual — " + "; ".join(reasons) + ".")
-            print("[ALDRIC] Switching to Governance Stack Mode to establish exactly what we're deciding first.\n")
-            conversation.append({"role": "assistant", "content": result.output_text})
-            raise _Escalate(conversation)
+            _announce_and_escalate(conversation, result)
 
-        print(f"\nALDRIC: {result.output_text}")
-        conversation.append({"role": "assistant", "content": result.output_text})
+        if result.needs_clarification:
+            question = result.clarifying_question or "Could you clarify that for me?"
+            print(f"\nALDRIC: {question}")
+            conversation.append({"role": "assistant", "content": question})
+
+            try:
+                answer = input("You: ")
+            except (EOFError, KeyboardInterrupt):
+                print("\nSession ended.")
+                return
+
+            scope = result.memory_scope or "general"
+            long_term_memory.set_preference(scope, answer)
+            print(f'[ALDRIC] Remembered that for next time (under "{scope}") — won\'t need to ask again.')
+            conversation.append({"role": "user", "content": answer})
+
+            try:
+                result = run_casual_turn(conversation, answer)
+            except Exception as exc:
+                print(f"\n(ALDRIC Mode turn failed: {exc})")
+                continue
+
+            if result.requires_escalation:
+                _announce_and_escalate(conversation, result)
+            # A second needs_clarification here isn't chased further — shown
+            # as-is below rather than looping again, so one user turn can't
+            # turn into an unbounded back-and-forth.
+
+        display_text = result.output_text or result.clarifying_question or "(no reply)"
+        print(f"\nALDRIC: {display_text}")
+        conversation.append({"role": "assistant", "content": display_text})
 
 
 def main() -> None:

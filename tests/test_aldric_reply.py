@@ -9,6 +9,7 @@ being silently guessed at.
 """
 import json
 
+import core.long_term_memory as long_term_memory
 import llm.aldric_reply as aldric_reply_module
 from llm.aldric_reply import run_casual_turn
 from models.schemas import Tier
@@ -16,6 +17,17 @@ from models.schemas import Tier
 
 def _mock_complete(canned: dict):
     def _fake(system, user_message, model=None, max_tokens=None):
+        return json.dumps(canned)
+    return _fake
+
+
+def _capturing_complete(canned: dict, captured: dict):
+    """Like _mock_complete, but records the exact system/user_message the
+    call received, so a test can assert on what actually reached the model —
+    used to prove stored memory is really injected, not just fetched."""
+    def _fake(system, user_message, model=None, max_tokens=None):
+        captured["system"] = system
+        captured["user_message"] = user_message
         return json.dumps(canned)
     return _fake
 
@@ -96,3 +108,62 @@ def test_non_json_output_raises_rather_than_guessing(monkeypatch):
         assert False, "expected ValueError"
     except ValueError as exc:
         assert "non-JSON" in str(exc)
+
+
+# --- Long-term memory injection ------------------------------------------
+
+def test_no_stored_memory_omits_the_known_memory_header(monkeypatch):
+    captured = {}
+    canned = {"output": "Sure.", "scope": "exploration", "touched_categories": [], "proposed_tool_call": None}
+    monkeypatch.setattr(aldric_reply_module, "complete", _capturing_complete(canned, captured))
+    run_casual_turn(conversation=[], user_message="hello")
+    assert "Known long-term memory" not in captured["system"]
+
+
+def test_stored_preference_reaches_the_models_system_prompt(monkeypatch):
+    long_term_memory.set_preference("client", "Formal tone, no jokes.")
+    captured = {}
+    canned = {"output": "Sure.", "scope": "exploration", "touched_categories": [], "proposed_tool_call": None}
+    monkeypatch.setattr(aldric_reply_module, "complete", _capturing_complete(canned, captured))
+    run_casual_turn(conversation=[], user_message="draft an email to a client")
+    assert "Formal tone, no jokes." in captured["system"]
+    assert "[client]" in captured["system"]
+
+
+def test_stored_fact_reaches_the_models_system_prompt(monkeypatch):
+    long_term_memory.record_fact("general", "Invoice numbers start with INV-", source="test")
+    captured = {}
+    canned = {"output": "Sure.", "scope": "exploration", "touched_categories": [], "proposed_tool_call": None}
+    monkeypatch.setattr(aldric_reply_module, "complete", _capturing_complete(canned, captured))
+    run_casual_turn(conversation=[], user_message="what's our invoice numbering")
+    assert "Invoice numbers start with INV-" in captured["system"]
+
+
+# --- Memory-clarification signal ------------------------------------------
+
+def test_needs_clarification_flows_through_to_result(monkeypatch):
+    canned = {
+        "output": "",
+        "scope": "exploration",
+        "touched_categories": [],
+        "proposed_tool_call": None,
+        "needs_clarification": True,
+        "clarifying_question": "What tone does this recipient prefer?",
+        "memory_scope": "client:acme",
+    }
+    monkeypatch.setattr(aldric_reply_module, "complete", _mock_complete(canned))
+    result = run_casual_turn(conversation=[], user_message="write an email to Acme")
+    assert result.needs_clarification is True
+    assert result.clarifying_question == "What tone does this recipient prefer?"
+    assert result.memory_scope == "client:acme"
+    # A quality signal only — must never by itself trigger governance escalation.
+    assert result.requires_escalation is False
+
+
+def test_needs_clarification_defaults_to_false_when_absent(monkeypatch):
+    canned = {"output": "Here you go.", "scope": "exploration", "touched_categories": [], "proposed_tool_call": None}
+    monkeypatch.setattr(aldric_reply_module, "complete", _mock_complete(canned))
+    result = run_casual_turn(conversation=[], user_message="hello")
+    assert result.needs_clarification is False
+    assert result.clarifying_question == ""
+    assert result.memory_scope == ""

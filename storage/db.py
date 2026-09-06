@@ -66,6 +66,25 @@ CREATE TABLE IF NOT EXISTS loops (
     state TEXT NOT NULL,
     updated_at TEXT NOT NULL
 );
+
+-- Long-term memory (see models.schemas.StandingPreference/MemoryFact and
+-- core/long_term_memory.py). Local SQLite only for now, deliberately: the
+-- Supabase mirroring every other table above has is not yet extended to
+-- these two, matching the agreed build order of proving the memory logic
+-- itself locally before swapping the durability layer underneath it.
+CREATE TABLE IF NOT EXISTS standing_preferences (
+    preference_id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL UNIQUE,
+    data TEXT NOT NULL,
+    updated_at TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS long_term_facts (
+    fact_id TEXT PRIMARY KEY,
+    scope TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 """
 
 
@@ -276,3 +295,57 @@ def list_loops(db_path: str = DEFAULT_DB_PATH) -> list[dict]:
     with connect(db_path) as conn:
         rows = conn.execute("SELECT loop_name, state, updated_at FROM loops").fetchall()
         return [{"loop_name": r[0], "state": r[1], "updated_at": r[2]} for r in rows]
+
+
+# --- Long-term memory: standing preferences (upsert-by-scope) -------------
+#
+# One active preference per scope — see models.schemas.StandingPreference.
+# INSERT OR REPLACE relies on the UNIQUE(scope) constraint above: setting a
+# new preference for a scope that already has one replaces it outright
+# (a new preference_id, the old row gone), matching Correction Absolute
+# (CLAUDE.md Section 7) — the latest instruction applies immediately and
+# completely, not as a resistible negotiation. Supabase mirroring not yet
+# built for this table (see schema comment above) — local SQLite only.
+
+def set_preference(preference, db_path: str = DEFAULT_DB_PATH) -> None:
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT OR REPLACE INTO standing_preferences (preference_id, scope, data, updated_at) "
+            "VALUES (?, ?, ?, ?)",
+            (preference.preference_id, preference.scope, preference.model_dump_json(), preference.updated_at),
+        )
+
+
+def get_preference(scope: str, db_path: str = DEFAULT_DB_PATH) -> dict | None:
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT data FROM standing_preferences WHERE scope = ?", (scope,)
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+
+def list_preferences(db_path: str = DEFAULT_DB_PATH) -> list[dict]:
+    with connect(db_path) as conn:
+        rows = conn.execute("SELECT data FROM standing_preferences ORDER BY scope").fetchall()
+        return [json.loads(r[0]) for r in rows]
+
+
+# --- Long-term memory: facts (append-only) ---------------------------------
+
+def append_fact(fact, db_path: str = DEFAULT_DB_PATH) -> None:
+    with connect(db_path) as conn:
+        conn.execute(
+            "INSERT INTO long_term_facts (fact_id, scope, data, created_at) VALUES (?, ?, ?, ?)",
+            (fact.fact_id, fact.scope, fact.model_dump_json(), fact.created_at),
+        )
+
+
+def list_facts(scope: str | None = None, db_path: str = DEFAULT_DB_PATH) -> list[dict]:
+    with connect(db_path) as conn:
+        if scope:
+            rows = conn.execute(
+                "SELECT data FROM long_term_facts WHERE scope = ? ORDER BY created_at", (scope,)
+            ).fetchall()
+        else:
+            rows = conn.execute("SELECT data FROM long_term_facts ORDER BY created_at").fetchall()
+        return [json.loads(r[0]) for r in rows]

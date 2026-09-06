@@ -33,6 +33,7 @@ runs regardless of what the model says about itself.
 | `06_Learning_Governance.md` | `core/learning_governance.py` | Deterministic: signal-type intake rejection of non-operational-truth signal, the Correction Absolute (`apply_correction` has no confidence-gated bypass), the Structural Floor as unreachable Python constants, and — as of this rebuild — mirror-drift indicators 1 and 2 (Section 4.2): confidence climbing with zero corrections ever, and corrections tapering off over the surface's own lifetime while confirmations keep climbing (a real time-series comparison of stored timestamps, never a judgment about *why*). Partial: indicators 3 and 4 ("outputs matching approval markers", "divergence from objective outcomes") still need an outcome-tracking data model this skeleton doesn't define yet — not faked here. |
 | `07_Operator_Profiles.md` | `core/operator_profiles.py` | Intentionally NOT a governance layer, per the source document itself — calibration templates only. |
 | `08_Governance_Chain.md` | `core/governance_chain.py`, `main.py`, `core/aldric_mode.py`, `aldric_chat.py` | Deterministic: load-order verification (order-sensitive, cascading failure), and the ALDRIC-Mode-vs-Governance-Stack-Mode initialization-state rule (observation mode vs. DSD Discovery firing immediately) — as of this rebuild's ALDRIC Mode entrypoint, that rule is real rather than descriptive: `core/aldric_mode.py`'s `requires_escalation()` is the one deterministic gate deciding whether a casual turn must escalate into a locked DSD, built from the same self-report-plus-scan discipline `llm/governed_reply.py` already uses, shared via `core/pa_action_kernel.py`'s `effective_tool_tier()` so the two modes' tool-call escalation logic cannot drift apart. LLM step: `llm/aldric_reply.py` runs the actual casual conversational turn. |
+| *(operator extension, not one of the eight documents)* | `models/schemas.py` (`StandingPreference`, `MemoryFact`), `core/long_term_memory.py`, `llm/aldric_reply.py` | Long-term memory across sessions — see "Long-term memory" below. Deterministic: all storage and retrieval (upsert-by-scope for preferences, append-only for facts). LLM step: deciding what's worth asking about instead of guessing (`needs_clarification`/`clarifying_question`/`memory_scope`) is self-reported and NOT governance-critical (`core/aldric_mode.py` never looks at it), unlike scope/touched_categories on the same turn. |
 
 ## What's built and tested
 
@@ -40,7 +41,7 @@ Run it:
 
 ```bash
 pip install -r requirements.txt
-pytest                    # 107 tests, all deterministic, no network calls
+pytest                    # 120 tests, all deterministic, no network calls
 uvicorn main:app --reload # http://127.0.0.1:8000/docs for interactive API
 
 export ANTHROPIC_API_KEY=sk-ant-...   # or Aldric-API, matching the Windows machine's existing var
@@ -70,6 +71,51 @@ once a Decision Surface locks, the rest of that session stays in Governance
 Stack Mode. Start a new session for a fresh casual conversation. Not yet
 wired into `webapp.py`'s browser UI — that's the natural next step once this
 terminal version has seen real use.
+
+## Long-term memory
+
+Every context window is, functionally, a brand new AI — nothing survives
+past it unless something durable was written down somewhere else. This is
+the piece that lets `aldric_chat.py` remember things across sessions instead
+of starting cold each time, built from a concrete gap observed running an
+earlier, prompt-based ALDRIC as a real assistant: it didn't know to vary
+email style by client vs. team vs. boss until told, every single time,
+because there was nowhere to keep that once it was said.
+
+Two kinds of memory exist so far (`models/schemas.py`, `core/long_term_memory.py`):
+
+- **Standing preferences** — a rule about *how to behave* that should just
+  be looked up and applied, not re-decided each time ("clients get a formal
+  tone"). One active preference per scope: setting a new one for a scope
+  replaces the old one outright, the same Correction Absolute principle
+  (CLAUDE.md Section 7) applied to preferences instead of corrections.
+- **Facts** — durable context worth carrying forward that isn't itself a
+  behavioral rule ("invoice numbers start with INV-"). Append-only.
+
+Both are plain local SQLite for now — no semantic/embedding search, on
+purpose, matching this project's own stance that real vector recall
+(`sqlite-vec`) is a later concern, not something to fake with an
+undifferentiated pile of memory dumped into every prompt. Every casual turn
+in `aldric_chat.py` is given the full list of stored preferences and facts
+before it answers (`llm/aldric_reply.py`), and if that still isn't enough —
+something genuinely depends on information nobody's given it yet — the model
+can say so (`needs_clarification`) instead of guessing. `aldric_chat.py`
+asks the one question, saves the answer as a new standing preference under
+the scope the model proposed, tells the operator plainly that it did so, and
+then actually finishes the original request with the new information —
+asking once, not every time after.
+
+A third, genuinely different memory concept is *not* wired in here:
+Learning Governance's per-Surface confidence (`core/learning_governance.py`)
+— a number shaped by a history of corrections and confirmations without
+needing to recall the specific events that built it, the closest honest
+analogue this system has to human "experience" rather than stored data. It
+needs a real `Surface` to attach to, which needs the real surface matcher
+(gap-list item 1 below) — tracked as still-open work, not attempted here.
+Also not yet built: a Supabase-backed version of this table (every other
+governance table already supports the swap, see `storage/_supabase.py`; these
+two don't yet) and an explicit "off" mode that persists nothing at all — the
+three-way local/customer-cloud/off choice discussed but not yet started.
 
 ## Using the browser UI (`webapp.py`)
 
@@ -179,7 +225,12 @@ This is a governance *kernel*, not a finished ALDRIC. To go further:
    data model (what counts as a prediction, what counts as an objective
    outcome, how a preference marker is told apart from truth signal at the
    *output* level) that this skeleton doesn't define yet, and only really
-   apply once ALDRIC Mode's surfaces exist and accumulate real history.
+   apply once ALDRIC Mode's surfaces exist and accumulate real history. Note
+   this is a different thing from the new long-term memory below — a
+   Surface's confidence is meant to be shaped by history without recalling
+   the specific events that built it; standing preferences and facts are
+   explicit, literal recall. Both are needed; neither substitutes for the
+   other.
 4. ~~KSP Finality phase orchestration.~~ **Done.** `chat.py` now runs the
    full Structural Projection / Validation Threads / Integrity Gate /
    Unknown Variable Audit / Compaction sequence (`core/ksp_finality.py`,
@@ -207,6 +258,11 @@ This is a governance *kernel*, not a finished ALDRIC. To go further:
 6. **Persistence beyond SQLite.** `storage/db.py` is plain relational SQLite.
    The project's own tech-stack reference lists `sqlite-vec` as a Phase 6+
    concern (semantic memory recall) — deliberately not pulled forward here.
+7. ~~Long-term memory.~~ **Half-done.** Standing preferences and facts across
+   sessions are built and tested — see "Long-term memory" above. Still open:
+   Supabase mirroring for these two tables (every other governance table
+   already supports the swap), an explicit "off" mode that persists nothing,
+   and the confidence-per-surface layer, which is blocked on item 1.
 
 ## A note on honesty in this build
 

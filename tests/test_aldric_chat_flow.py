@@ -102,3 +102,84 @@ def test_operator_can_exit_casual_session_without_ever_escalating(monkeypatch, c
     out = capsys.readouterr().out
     assert "Session ended" not in out  # exited via the 'exit' command, not EOF/KeyboardInterrupt
     assert "ALDRIC Mode (casual)" in out
+
+
+def test_clarification_round_trip_saves_preference_and_completes_original_request(monkeypatch, capsys):
+    """Proves the full loop the operator described from real use: ALDRIC
+    can't answer confidently, asks one question instead of guessing, the
+    answer gets remembered (visibly, not silently), and the original request
+    then actually gets completed using that new information rather than
+    just filed away for a future turn."""
+    first_result = CasualTurnResult(
+        output_text="",
+        signal=EscalationSignal(self_reported_scope="exploration"),
+        needs_clarification=True,
+        clarifying_question="What tone should I use for this client?",
+        memory_scope="client:acme",
+    )
+    follow_up_result = CasualTurnResult(
+        output_text="Here's your formal email draft for Acme.",
+        signal=EscalationSignal(self_reported_scope="exploration"),
+    )
+    results = iter([first_result, follow_up_result])
+    monkeypatch.setattr(aldric_chat, "run_casual_turn", lambda conversation, user_message: next(results))
+    monkeypatch.setattr(
+        "builtins.input",
+        _scripted_inputs(
+            "write an email to Acme",   # triggers the clarification
+            "Formal tone, no jokes",    # operator's answer
+            "exit",
+        ),
+    )
+
+    aldric_chat.main()
+    out = capsys.readouterr().out
+    assert "What tone should I use for this client?" in out
+    assert 'Remembered that for next time (under "client:acme")' in out
+    assert "Here's your formal email draft for Acme." in out
+
+    import core.long_term_memory as long_term_memory
+    saved = long_term_memory.get_preference("client:acme")
+    assert saved is not None
+    assert saved.content == "Formal tone, no jokes"
+
+
+def test_clarification_that_itself_escalates_hands_off_correctly(monkeypatch, capsys):
+    """The follow-up turn after answering a clarifying question can still
+    turn out to need Governance Stack Mode (e.g. the answer itself revealed
+    a real commitment) — proves that path is checked too, not just the
+    first attempt."""
+    db.init_db()
+    first_result = CasualTurnResult(
+        output_text="",
+        signal=EscalationSignal(self_reported_scope="exploration"),
+        needs_clarification=True,
+        clarifying_question="What should we charge for this package?",
+        memory_scope="pricing",
+    )
+    escalating_follow_up = CasualTurnResult(
+        output_text="Sure, we'll do the package for $3,200.",
+        signal=EscalationSignal(
+            self_reported_scope="exploration",
+            scanned_categories=frozenset({"pricing_or_cost_commitment"}),
+        ),
+    )
+    results = iter([first_result, escalating_follow_up])
+    monkeypatch.setattr(aldric_chat, "run_casual_turn", lambda conversation, user_message: next(results))
+    monkeypatch.setattr(chat, "run_interview_step", _complete_interview_step)
+    monkeypatch.setattr(chat, "_build_ids_detector", lambda: HeuristicIDSDetector())
+    monkeypatch.setattr(
+        "builtins.input",
+        _scripted_inputs(
+            "what should we charge for the package",
+            "$3,200",
+            "confirmed",
+            "exit",
+        ),
+    )
+
+    aldric_chat.main()
+    out = capsys.readouterr().out
+    assert "What should we charge for this package?" in out
+    assert "This has stopped being casual" in out
+    assert "Governance Stack Mode" in out
