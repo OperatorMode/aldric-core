@@ -45,7 +45,29 @@ uvicorn main:app --reload # http://127.0.0.1:8000/docs for interactive API
 
 export ANTHROPIC_API_KEY=sk-ant-...   # or Aldric-API, matching the Windows machine's existing var
 python chat.py             # actual governed conversation, terminal chat
+python webapp.py           # same governed conversation, browser UI at http://127.0.0.1:8000
 ```
+
+## Using the browser UI (`webapp.py`)
+
+`webapp.py` is `chat.py`'s exact governed sequence over a WebSocket instead of
+a blocking `input()` loop, with a small static page (`static/index.html`) as
+the client. It exists purely as a nicer way to exercise the same kernel —
+every function it calls is imported straight from `core/` and `llm/`, so
+nothing about the gating logic changes and nothing runs twice. In particular:
+DSD Discovery still runs as a real conversational interview and reflects the
+six fields back verbatim before locking; ordinary replies still show up
+directly; a Finality-scope or permanent-category reply still stops at a
+non-binding "Adjudication required" card; and a permanent-category artifact
+still needs a second, distinct authorization before it's treated as final.
+The Confirm / Reject / Defer and Send it / Hold buttons are convenience only
+— clicking one submits the exact same literal canonical phrase
+(`classify_confirmation` / `classify_emission_authorization` in
+`models/schemas.py`) a person would otherwise have had to type correctly in
+a terminal; there is no button that marks anything confirmed or authorized
+without that deterministic check passing. Run `python webapp.py` and open
+`http://127.0.0.1:8000` in a browser — same `ANTHROPIC_API_KEY`/`Aldric-API`
+requirement as `chat.py`.
 
 ## Using the chat
 

@@ -1,0 +1,366 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ALDRIC — Governed Chat</title>
+<style>
+  :root {
+    --bg: #0f1216;
+    --panel: #171b21;
+    --panel-2: #1e242c;
+    --border: #2a313b;
+    --text: #e7ebf0;
+    --muted: #8a94a3;
+    --accent: #4f8cff;
+    --warn-bg: #2a2210;
+    --warn-border: #6b5a1a;
+    --warn-text: #f0d878;
+    --danger-bg: #2a1414;
+    --danger-border: #6b2a2a;
+    --danger-text: #f08a8a;
+    --ok: #58c77a;
+  }
+  * { box-sizing: border-box; }
+  html, body { height: 100%; }
+  body {
+    margin: 0;
+    background: var(--bg);
+    color: var(--text);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+    display: flex;
+    flex-direction: column;
+  }
+  header {
+    padding: 14px 20px;
+    border-bottom: 1px solid var(--border);
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    background: var(--panel);
+  }
+  header h1 { font-size: 15px; margin: 0; font-weight: 600; letter-spacing: 0.3px; }
+  header .status { font-size: 12px; color: var(--muted); }
+  header .status.connected { color: var(--ok); }
+  #phase-pill {
+    font-size: 11px;
+    padding: 3px 10px;
+    border-radius: 999px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--muted);
+  }
+  #digest-btn {
+    font-size: 12px;
+    background: var(--panel-2);
+    border: 1px solid var(--border);
+    color: var(--text);
+    padding: 6px 12px;
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  #digest-btn:hover { border-color: var(--accent); }
+  main {
+    flex: 1;
+    overflow-y: auto;
+    padding: 20px;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    max-width: 780px;
+    width: 100%;
+    margin: 0 auto;
+  }
+  .msg { max-width: 80%; padding: 10px 14px; border-radius: 12px; line-height: 1.45; font-size: 14px; white-space: pre-wrap; }
+  .msg.assistant { align-self: flex-start; background: var(--panel-2); border: 1px solid var(--border); border-bottom-left-radius: 3px; }
+  .msg.user { align-self: flex-end; background: var(--accent); color: white; border-bottom-right-radius: 3px; }
+  .msg.system { align-self: center; color: var(--muted); font-size: 12.5px; font-style: italic; text-align: center; max-width: 90%; }
+  .msg.error { align-self: center; color: var(--danger-text); font-size: 12.5px; text-align: center; max-width: 90%; }
+
+  .card {
+    align-self: center;
+    width: 100%;
+    border-radius: 10px;
+    padding: 14px 16px;
+    font-size: 13.5px;
+    border: 1px solid var(--border);
+    background: var(--panel);
+  }
+  .card.dsd h3, .card.adjudication h3, .card.emission h3 { margin: 0 0 8px 0; font-size: 13px; text-transform: uppercase; letter-spacing: 0.5px; color: var(--muted); }
+  .card.adjudication { background: var(--warn-bg); border-color: var(--warn-border); }
+  .card.adjudication h3 { color: var(--warn-text); }
+  .card.emission { background: var(--danger-bg); border-color: var(--danger-border); }
+  .card.emission h3 { color: var(--danger-text); }
+  .card .field { margin-bottom: 6px; }
+  .card .field .k { color: var(--muted); font-size: 11.5px; text-transform: uppercase; letter-spacing: 0.4px; }
+  .card .field .v { margin-top: 1px; }
+  .card .response-block { background: rgba(0,0,0,0.2); border-radius: 6px; padding: 8px 10px; margin: 6px 0 10px 0; white-space: pre-wrap; }
+  .card .note { color: var(--muted); font-size: 12px; margin-top: 6px; }
+  .badge { display: inline-block; font-size: 11px; padding: 2px 8px; border-radius: 999px; border: 1px solid var(--border); margin-right: 6px; }
+  .badge.tier_c { border-color: var(--danger-border); color: var(--danger-text); }
+  .badge.tier_b { border-color: var(--warn-border); color: var(--warn-text); }
+  .badge.tier_a { border-color: var(--border); color: var(--muted); }
+  .actions { display: flex; gap: 8px; margin-top: 12px; flex-wrap: wrap; }
+  button.action-btn {
+    font-size: 13px; padding: 7px 14px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--panel-2); color: var(--text); cursor: pointer;
+  }
+  button.action-btn:hover { filter: brightness(1.15); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: white; }
+  button.danger { background: transparent; border-color: var(--danger-border); color: var(--danger-text); }
+  button.neutral { background: transparent; border-color: var(--border); color: var(--muted); }
+
+  .digest-card { align-self: center; width: 100%; border: 1px solid var(--border); background: var(--panel); border-radius: 10px; padding: 14px 16px; font-size: 13px; }
+  .digest-card h3 { margin: 0 0 8px 0; font-size: 13px; color: var(--muted); text-transform: uppercase; }
+  .digest-entry { border-top: 1px solid var(--border); padding: 6px 0; }
+  .digest-entry:first-of-type { border-top: none; }
+  .digest-entry .cat { color: var(--accent); font-weight: 600; }
+
+  footer {
+    border-top: 1px solid var(--border);
+    background: var(--panel);
+    padding: 12px 20px;
+  }
+  #composer { max-width: 780px; margin: 0 auto; display: flex; gap: 8px; }
+  #composer input {
+    flex: 1; background: var(--panel-2); border: 1px solid var(--border); color: var(--text);
+    border-radius: 8px; padding: 10px 12px; font-size: 14px;
+  }
+  #composer input:focus { outline: none; border-color: var(--accent); }
+  #composer button {
+    background: var(--accent); color: white; border: none; border-radius: 8px; padding: 0 18px; font-size: 14px; cursor: pointer;
+  }
+  #composer button:disabled { opacity: 0.5; cursor: not-allowed; }
+  #hint { max-width: 780px; margin: 6px auto 0 auto; font-size: 11.5px; color: var(--muted); }
+</style>
+</head>
+<body>
+
+<header>
+  <h1>ALDRIC — Governed Chat</h1>
+  <div style="display:flex; align-items:center; gap:10px;">
+    <span id="phase-pill">connecting…</span>
+    <button id="digest-btn">Digest</button>
+    <span id="status" class="status">connecting…</span>
+  </div>
+</header>
+
+<main id="main"></main>
+
+<footer>
+  <div id="composer">
+    <input id="input" type="text" placeholder="Type your message and press Enter…" autocomplete="off" />
+    <button id="send-btn">Send</button>
+  </div>
+  <div id="hint">This runs the real governance kernel — nothing shown as "confirmed" or "sent" skips the deterministic gate in core/.</div>
+</footer>
+
+<script>
+const main = document.getElementById('main');
+const input = document.getElementById('input');
+const sendBtn = document.getElementById('send-btn');
+const statusEl = document.getElementById('status');
+const phasePill = document.getElementById('phase-pill');
+const digestBtn = document.getElementById('digest-btn');
+
+let phase = 'dsd_discovery';
+
+function scrollDown() { main.scrollTop = main.scrollHeight; }
+
+function addBubble(kind, text) {
+  const div = document.createElement('div');
+  div.className = 'msg ' + kind;
+  div.textContent = text;
+  main.appendChild(div);
+  scrollDown();
+}
+
+function setPhase(p) {
+  phase = p;
+  const labels = {
+    dsd_discovery: 'Establishing decision surface…',
+    dsd_confirm: 'Awaiting your confirmation',
+    chat: 'Governed chat live',
+    awaiting_confirm: 'Awaiting content confirmation',
+    awaiting_emission: 'Awaiting emission authorization',
+    ended: 'Session ended',
+  };
+  phasePill.textContent = labels[p] || p;
+}
+
+function addDsdCard(fields) {
+  const div = document.createElement('div');
+  div.className = 'card dsd';
+  let html = '<h3>Decision Surface — please confirm</h3>';
+  for (const [k, v] of Object.entries(fields)) {
+    html += `<div class="field"><div class="k">${escapeHtml(k)}</div><div class="v">${escapeHtml(String(v))}</div></div>`;
+  }
+  html += '<div class="actions">' +
+    '<button class="action-btn primary" data-action="confirm">Yes, that\'s correct</button>' +
+    '</div>' +
+    '<div class="note">Or type a plain reply below — only an exact "confirmed" / "correct" / "yes" / "proceed" / "locked" locks it.</div>';
+  div.innerHTML = html;
+  main.appendChild(div);
+  wireActionButtons(div);
+  setPhase('dsd_confirm');
+  scrollDown();
+}
+
+function tierBadge(tier) {
+  if (!tier) return '';
+  return `<span class="badge ${tier}">${tier.replace('tier_', 'Tier ').toUpperCase()}</span>`;
+}
+
+function addAdjudicationCard(record, note) {
+  const div = document.createElement('div');
+  div.className = 'card adjudication';
+  let html = '<h3>! Adjudication required — draft, not yet binding</h3>';
+  html += `<div class="response-block">${escapeHtml(record.response)}</div>`;
+  if (record.tool_call) {
+    html += '<div class="field"><div class="k">Proposed action</div><div class="v">' +
+      `Tool: ${escapeHtml(record.tool_call.tool_name || '')}<br>` +
+      `Arguments: ${escapeHtml(JSON.stringify(record.tool_call.arguments || {}))}` +
+      '</div></div>';
+  }
+  html += '<div class="field"><div class="k">Risk classification</div><div class="v">' +
+    `Scope: ${escapeHtml(record.scope)} &nbsp; ${tierBadge(record.tool_effective_tier)}<br>` +
+    `Touches Permanent Tier C: ${record.touches_permanent_tier_c ? 'yes' : 'no'}` +
+    (record.categories.length ? `<br>Categories: ${escapeHtml(record.categories.join(', '))}` : '') +
+    `<br><span style="color:var(--muted); font-size:11.5px;">Fingerprint: ${escapeHtml(record.fingerprint)}</span>` +
+    '</div></div>';
+  if (note) html += `<div class="note">${escapeHtml(note)}</div>`;
+  html += '<div class="actions">' +
+    '<button class="action-btn primary" data-action="confirm">Confirm</button>' +
+    '<button class="action-btn danger" data-action="reject">Reject</button>' +
+    '<button class="action-btn neutral" data-action="defer">Defer</button>' +
+    '</div>';
+  div.innerHTML = html;
+  main.appendChild(div);
+  wireActionButtons(div);
+  setPhase('awaiting_confirm');
+  scrollDown();
+}
+
+function addEmissionCard(record, note) {
+  const div = document.createElement('div');
+  div.className = 'card emission';
+  let html = '<h3>Second authorization required — Permanent Tier C</h3>';
+  html += `<div class="response-block">${escapeHtml(record.response)}</div>`;
+  if (note) html += `<div class="note">${escapeHtml(note)}</div>`;
+  html += `<div class="note">Fingerprint: ${escapeHtml(record.fingerprint)} — authorizing releases exactly this, nothing else.</div>`;
+  html += '<div class="actions">' +
+    '<button class="action-btn primary" data-action="authorize_emission">Send it</button>' +
+    '<button class="action-btn neutral" data-action="cancel_emission">Hold — not yet</button>' +
+    '</div>';
+  div.innerHTML = html;
+  main.appendChild(div);
+  wireActionButtons(div);
+  setPhase('awaiting_emission');
+  scrollDown();
+}
+
+function addDigestCard(entries) {
+  const div = document.createElement('div');
+  div.className = 'digest-card';
+  let html = `<h3>Digest — ${entries.length} entr${entries.length === 1 ? 'y' : 'ies'}</h3>`;
+  if (!entries.length) {
+    html += '<div class="digest-entry" style="color:var(--muted)">Nothing logged since the last digest.</div>';
+  }
+  for (const e of entries) {
+    html += `<div class="digest-entry"><span class="cat">${escapeHtml(e.category)}</span> — ${escapeHtml(JSON.stringify(e.payload))}</div>`;
+  }
+  div.innerHTML = html;
+  main.appendChild(div);
+  scrollDown();
+}
+
+function addApexBlocked(markers) {
+  const div = document.createElement('div');
+  div.className = 'card adjudication';
+  div.innerHTML = `<h3>APEX — drift detected</h3><div>Markers: ${escapeHtml(markers.join(', '))}</div>` +
+    '<div class="note">Output withheld, forced to Validation scope. Rephrase or clarify and try again.</div>';
+  main.appendChild(div);
+  scrollDown();
+}
+
+function wireActionButtons(container) {
+  container.querySelectorAll('button[data-action]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      container.querySelectorAll('button').forEach(b => b.disabled = true);
+      sendJson({ type: 'action', name: btn.getAttribute('data-action') });
+    });
+  });
+}
+
+function escapeHtml(s) {
+  const d = document.createElement('div');
+  d.textContent = s;
+  return d.innerHTML;
+}
+
+let ws;
+function connect() {
+  const proto = location.protocol === 'https:' ? 'wss' : 'ws';
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => { statusEl.textContent = 'connected'; statusEl.classList.add('connected'); };
+  ws.onclose = () => { statusEl.textContent = 'disconnected'; statusEl.classList.remove('connected'); };
+  ws.onerror = () => { statusEl.textContent = 'connection error'; };
+  ws.onmessage = (ev) => {
+    const event = JSON.parse(ev.data);
+    handleEvent(event);
+  };
+}
+
+function handleEvent(event) {
+  switch (event.type) {
+    case 'system':
+      addBubble('system', event.text);
+      break;
+    case 'assistant':
+      addBubble('assistant', event.text);
+      if (phase !== 'dsd_discovery') setPhase('chat');
+      break;
+    case 'error':
+      addBubble('error', event.text);
+      break;
+    case 'dsd_reflection':
+      addDsdCard(event.fields);
+      break;
+    case 'adjudication':
+      addAdjudicationCard(event.record, event.text);
+      break;
+    case 'emission_request':
+      addEmissionCard(event.record, event.text);
+      break;
+    case 'digest':
+      addDigestCard(event.entries);
+      break;
+    case 'apex_blocked':
+      addApexBlocked(event.markers);
+      break;
+    default:
+      console.log('unhandled event', event);
+  }
+}
+
+function sendJson(obj) {
+  if (ws && ws.readyState === WebSocket.OPEN) ws.send(JSON.stringify(obj));
+}
+
+function sendText() {
+  const text = input.value.trim();
+  if (!text) return;
+  addBubble('user', text);
+  sendJson({ type: 'text', text });
+  input.value = '';
+}
+
+sendBtn.addEventListener('click', sendText);
+input.addEventListener('keydown', (e) => { if (e.key === 'Enter') sendText(); });
+digestBtn.addEventListener('click', () => sendJson({ type: 'action', name: 'digest' }));
+
+setPhase('dsd_discovery');
+connect();
+</script>
+</body>
+</html>
