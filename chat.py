@@ -66,7 +66,9 @@ def _print(label: str, text: str = "") -> None:
     print(f"\n{label}{text}")
 
 
-def run_dsd_discovery() -> "DecisionSurfaceDocument":  # noqa: F821 (imported below, forward ref only for readability)
+def run_dsd_discovery(
+    seed_conversation: list[dict[str, str]] | None = None,
+) -> "DecisionSurfaceDocument":  # noqa: F821 (imported below, forward ref only for readability)
     from models.schemas import DecisionSurfaceDocument  # local import to keep top imports lean
 
     print("=" * 70)
@@ -74,7 +76,12 @@ def run_dsd_discovery() -> "DecisionSurfaceDocument":  # noqa: F821 (imported be
     print("Before anything else, a few questions to establish what we're deciding.")
     print("=" * 70)
 
-    conversation: list[dict[str, str]] = []
+    # `seed_conversation`: aldric_chat.py's on-demand escalation passes the
+    # casual conversation that triggered it, so run_interview_step can
+    # extract DSD fields the operator already stated instead of asking them
+    # to repeat context they just gave. chat.py's own callers never pass
+    # this — plain DSD Discovery always starts cold, exactly as before.
+    conversation: list[dict[str, str]] = list(seed_conversation) if seed_conversation else []
     fields: dict[str, object] = {}
 
     while True:
@@ -102,7 +109,7 @@ def run_dsd_discovery() -> "DecisionSurfaceDocument":  # noqa: F821 (imported be
     except DSDGateError as exc:
         print(f"\nCould not construct a valid Decision Surface yet: {exc}")
         print("Restarting discovery for the incomplete parts.\n")
-        return run_dsd_discovery()
+        return run_dsd_discovery(seed_conversation)
 
     # Deterministic reflection (Section 11) — NOT another LLM call. We show
     # back exactly what was structurally extracted, in canonical order.
@@ -249,12 +256,23 @@ def _build_ids_detector() -> IDSDetector:
     return SidecarIDSDetector()
 
 
-def main() -> None:
-    db.init_db()
-    dsd = run_dsd_discovery()
-    buffer = AdjudicationBuffer()
-    ids_detector = _build_ids_detector()
-    conversation: list[dict[str, str]] = []
+def run_governed_session(
+    dsd: "DecisionSurfaceDocument",  # noqa: F821 (forward ref only for readability)
+    buffer: AdjudicationBuffer | None = None,
+    ids_detector: IDSDetector | None = None,
+    conversation: list[dict[str, str]] | None = None,
+) -> None:
+    """The Governance Stack Mode conversation loop, once a DSD is already
+    locked — factored out of main() so that aldric_mode's on-demand
+    escalation path (aldric_chat.py) can hand off into this exact, tested
+    loop after locking a DSD mid-session, instead of a second, divergence-
+    prone copy of the same adjudication/KSP-Finality/APEX control flow.
+    `buffer`/`ids_detector`/`conversation` are only ever overridden by
+    callers that need to seed or continue state (aldric_chat.py); chat.py's
+    own `main()` below always starts all three fresh."""
+    buffer = buffer if buffer is not None else AdjudicationBuffer()
+    ids_detector = ids_detector if ids_detector is not None else _build_ids_detector()
+    conversation = conversation if conversation is not None else []
 
     print("Governed chat is live. Commands: 'digest', 'exit'.\n")
     while True:
@@ -320,6 +338,12 @@ def main() -> None:
         else:
             print(f"\nALDRIC: {result.output_text}")
             conversation.append({"role": "assistant", "content": result.output_text})
+
+
+def main() -> None:
+    db.init_db()
+    dsd = run_dsd_discovery()
+    run_governed_session(dsd)
 
 
 if __name__ == "__main__":

@@ -49,7 +49,7 @@ import json
 from dataclasses import dataclass
 from typing import Optional
 
-from core.pa_action_kernel import build_action_request, classify_tier
+from core.pa_action_kernel import build_action_request, classify_tier, effective_tool_tier
 from core.permanent_category_scan import scan_for_permanent_categories
 from llm.client import DEFAULT_MODEL, complete, strip_json_code_fence
 from models.schemas import DecisionSurfaceDocument, PERMANENT_TIER_C_CATEGORIES, Tier
@@ -120,19 +120,14 @@ class GovernedTurnResult:
 
     @property
     def tool_effective_tier(self) -> Optional[Tier]:
-        """The tier that actually governs a proposed tool call. Escalation
-        is one-directional and authoritative: if argument-text scanning (or
-        self-report, or output-text scanning) found a permanent category
-        that classify_tier() couldn't see from tool identity alone, the
-        effective tier is forced to Tier C — full stop, regardless of what
-        classify_tier() itself concluded. This can only ever raise a tier to
-        C; nothing here is permitted to lower a tier classify_tier() already
-        set (e.g. its own fail-closed 'no surface match' -> Tier C)."""
+        """The tier that actually governs a proposed tool call. See
+        core.pa_action_kernel.effective_tool_tier for the shared arithmetic
+        (also used by ALDRIC Mode's llm/aldric_reply.py) — escalation is
+        one-directional and authoritative; this can only ever raise a tier
+        to C, never lower one classify_tier() already set."""
         if self.proposed_tool_call is None:
             return None
-        if self.tool_identity_tier == Tier.C or self.touches_permanent_tier_c:
-            return Tier.C
-        return self.tool_identity_tier
+        return effective_tool_tier(self.tool_identity_tier, self.touches_permanent_tier_c)
 
     @property
     def requires_adjudication(self) -> bool:

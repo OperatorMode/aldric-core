@@ -174,6 +174,28 @@ def classify_tier(
 # Component 5 — Contextual Drift Detection
 # ---------------------------------------------------------------------------
 
+def effective_tool_tier(identity_tier: Optional[Tier], touches_permanent_tier_c: bool) -> Optional[Tier]:
+    """The tier that actually governs a proposed tool call once argument-text
+    (and output-text, and self-report) scanning is folded in. Escalation is
+    one-directional and authoritative: if `identity_tier` (classify_tier()'s
+    own conclusion from tool identity + surface state alone) is already C, or
+    `touches_permanent_tier_c` is True (a permanent category was found
+    anywhere in the turn — self-reported, scanned from the free-form output,
+    or scanned from the tool call's own arguments), the effective tier is
+    forced to C — full stop. This can only ever raise a tier to C; nothing
+    here is permitted to lower a tier `classify_tier()` already set.
+
+    Shared by llm/governed_reply.py (Governance Stack Mode, a locked DSD
+    already exists) and llm/aldric_reply.py (ALDRIC Mode, no DSD yet) so this
+    one governance-critical arithmetic can't quietly drift into two different
+    answers between the two call sites — see CLAUDE.md Section 1."""
+    if identity_tier is None:
+        return None
+    if identity_tier == Tier.C or touches_permanent_tier_c:
+        return Tier.C
+    return identity_tier
+
+
 def assess_drift(context_snapshot: dict, current_context: dict, thresholds: dict) -> DriftLevel:
     """Section 5.4: thresholds are operator-defined, not system-defined.
     `thresholds` is expected to carry operator-set cutoffs (e.g. how many
