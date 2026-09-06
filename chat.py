@@ -30,12 +30,13 @@ from __future__ import annotations
 
 import sys
 
-from core.apex_supervisor import HeuristicIDSDetector, apply_apex_response
+from core.apex_supervisor import IDSDetector, apply_apex_response
 from core.ksp0_dsd import DSDGate, DSDGateError, build_dsd
 from core.ksp1_operator_kernel import AdjudicationBuffer
 from core.pa_action_kernel import generate_daily_digest, log_digest_entry
 from llm.dsd_interview import run_interview_step
 from llm.governed_reply import run_governed_turn
+from llm.sidecar import SidecarIDSDetector
 from models.schemas import (
     AdjudicationRecord,
     ConfirmationResult,
@@ -231,11 +232,22 @@ def _handle_adjudication(buffer: AdjudicationBuffer, dsd_ref: str, result) -> st
     return result.output_text
 
 
+def _build_ids_detector() -> IDSDetector:
+    """The real APEX drift check, promoted to Governance Stack Mode's
+    default per README gap-list item 2: a second, independently-invoked
+    model call against the actual four IDS markers (llm/sidecar.py),
+    not the offline HeuristicIDSDetector keyword scan. This costs one
+    extra model call per turn (latency + spend) in exchange for a real
+    semantic check instead of a weak surface-level one — tests substitute
+    HeuristicIDSDetector here to stay deterministic and network-free."""
+    return SidecarIDSDetector()
+
+
 def main() -> None:
     db.init_db()
     dsd = run_dsd_discovery()
     buffer = AdjudicationBuffer()
-    ids_detector = HeuristicIDSDetector()
+    ids_detector = _build_ids_detector()
     conversation: list[dict[str, str]] = []
 
     print("Governed chat is live. Commands: 'digest', 'exit'.\n")

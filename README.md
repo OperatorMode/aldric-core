@@ -115,12 +115,16 @@ This is a governance *kernel*, not a finished ALDRIC. To go further:
    parsing its output into a `Surface` reference, still gated by
    `classify_tier()`. Relevant to ALDRIC Mode only — `chat.py` doesn't need
    this.
-2. **The Sidecar Auditor is built but not the default.** `chat.py` uses
-   `HeuristicIDSDetector` (keyword-level, weak, no extra API call) rather
-   than `SidecarIDSDetector` (a real second model call against the actual
-   four IDS markers) by default, to avoid doubling API cost/latency on every
-   turn. Swapping it in `chat.py` is a one-line change once that tradeoff is
-   worth making for you.
+2. ~~The Sidecar Auditor is built but not the default.~~ **Done.**
+   `chat.py` now builds its IDS detector through `_build_ids_detector()`,
+   which returns `SidecarIDSDetector` (a real second model call against the
+   actual four IDS markers) rather than `HeuristicIDSDetector`. This does
+   cost one extra model call per turn — accepted latency/spend for a real
+   semantic check instead of a weak keyword scan. `HeuristicIDSDetector`
+   is still available (imported from `core.apex_supervisor`) and is what
+   the test suite substitutes to stay deterministic and network-free;
+   swap `_build_ids_detector()` back to it if the cost tradeoff ever isn't
+   worth it for a given run.
 3. **Full mirror-drift detection.** Only the "confidence climbing without
    corresponding correction" indicator is implemented. The other three
    need an outcome-tracking data model this skeleton doesn't define yet, and

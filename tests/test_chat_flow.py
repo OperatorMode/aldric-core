@@ -8,6 +8,7 @@ never gets hit — before ever running it against a live API key.
 import itertools
 
 import chat
+from core.apex_supervisor import HeuristicIDSDetector
 from core.ksp1_operator_kernel import AdjudicationStage
 from llm.governed_reply import GovernedTurnResult
 from storage import db
@@ -39,6 +40,7 @@ def _scripted_inputs(*answers):
 
 def test_dsd_discovery_completes_in_one_step_and_locks(monkeypatch):
     monkeypatch.setattr(chat, "run_interview_step", _complete_interview_step)
+    monkeypatch.setattr(chat, "_build_ids_detector", lambda: HeuristicIDSDetector())
     monkeypatch.setattr("builtins.input", _scripted_inputs("confirmed"))
 
     dsd = chat.run_dsd_discovery()
@@ -50,6 +52,7 @@ def test_dsd_discovery_completes_in_one_step_and_locks(monkeypatch):
 
 def test_ambiguous_then_clear_confirmation(monkeypatch):
     monkeypatch.setattr(chat, "run_interview_step", _complete_interview_step)
+    monkeypatch.setattr(chat, "_build_ids_detector", lambda: HeuristicIDSDetector())
     monkeypatch.setattr("builtins.input", _scripted_inputs("not sure honestly", "confirmed"))
 
     dsd = chat.run_dsd_discovery()
@@ -59,6 +62,7 @@ def test_ambiguous_then_clear_confirmation(monkeypatch):
 def test_ordinary_turn_shows_output_without_adjudication(monkeypatch, capsys):
     db.init_db()
     monkeypatch.setattr(chat, "run_interview_step", _complete_interview_step)
+    monkeypatch.setattr(chat, "_build_ids_detector", lambda: HeuristicIDSDetector())
 
     ordinary_result = GovernedTurnResult(
         reasoning="r", output_text="Here's a quick recap of the meeting.",
@@ -84,6 +88,7 @@ def test_ordinary_turn_shows_output_without_adjudication(monkeypatch, capsys):
 def test_permanent_category_turn_requires_two_confirmations(monkeypatch, capsys):
     db.init_db()
     monkeypatch.setattr(chat, "run_interview_step", _complete_interview_step)
+    monkeypatch.setattr(chat, "_build_ids_detector", lambda: HeuristicIDSDetector())
 
     pricing_result = GovernedTurnResult(
         reasoning="r", output_text="I'll set the price to $5,000 for that package.",
@@ -120,6 +125,7 @@ def test_rejecting_a_permanent_category_artifact_never_emits_it(monkeypatch, cap
     were an accepted reply."""
     db.init_db()
     monkeypatch.setattr(chat, "run_interview_step", _complete_interview_step)
+    monkeypatch.setattr(chat, "_build_ids_detector", lambda: HeuristicIDSDetector())
 
     pricing_result = GovernedTurnResult(
         reasoning="r", output_text="UNIQUE_MARKER_should_never_be_printed $9,999",

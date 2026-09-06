@@ -29,6 +29,7 @@ what it's binding.
 import pytest
 
 import chat
+from core.apex_supervisor import HeuristicIDSDetector
 from core.ksp1_operator_kernel import AdjudicationBuffer, AdjudicationError
 from llm.governed_reply import GovernedTurnResult
 from models.schemas import AdjudicationRecord, AdjudicationStage, Tier
@@ -218,6 +219,7 @@ def test_end_to_end_operator_actually_sees_the_proposed_tool_call_before_confirm
     that screen was printed, not before."""
     db.init_db()
     monkeypatch.setattr(chat, "run_interview_step", _complete_interview_step)
+    monkeypatch.setattr(chat, "_build_ids_detector", lambda: HeuristicIDSDetector())
 
     pricing_result = GovernedTurnResult(
         reasoning="r",
