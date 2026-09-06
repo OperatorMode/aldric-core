@@ -65,7 +65,15 @@ def strip_json_code_fence(raw: str) -> str:
 def complete(system: str, user_message: str, model: str = DEFAULT_MODEL, max_tokens: int = 1024) -> str:
     """A single, non-streaming completion. Callers are responsible for
     parsing structured output out of the returned text and for passing it
-    through the appropriate core/ gate before treating it as binding."""
+    through the appropriate core/ gate before treating it as binding.
+
+    `response.content[0]` is NOT reliably the text block: a model with
+    extended thinking on (claude-sonnet-5 among them) puts a `ThinkingBlock`
+    (or `RedactedThinkingBlock`) first in the content list, ahead of the
+    actual `TextBlock`. Indexing blindly broke every call site the moment
+    such a model was used. Find the first block whose `type` is "text"
+    instead of assuming position — correct regardless of how many
+    thinking/other blocks precede it."""
     client = get_client()
     response = client.messages.create(
         model=model,
@@ -73,4 +81,7 @@ def complete(system: str, user_message: str, model: str = DEFAULT_MODEL, max_tok
         system=system,
         messages=[{"role": "user", "content": user_message}],
     )
-    return response.content[0].text if response.content else ""
+    for block in response.content:
+        if getattr(block, "type", None) == "text":
+            return block.text
+    return ""
