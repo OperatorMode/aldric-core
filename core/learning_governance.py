@@ -185,25 +185,68 @@ class MirrorDriftAssessment:
         return len(self.indicators) > 0
 
 
+def _corrections_split_at_midpoint(surface: Surface, records: list[dict]) -> tuple[int, int]:
+    """Split a surface's correction history into an earlier and a later
+    half by time, using the surface's own lifetime midpoint
+    (`created_at` -> now) as the boundary. Purely structural — no
+    operator-defined window exists for this indicator any more than for
+    indicator 1, so the surface's own age is the only honest boundary
+    available without inventing a threshold nobody set.
+
+    `records` are the plain dicts `storage.db.list_conflict_records` returns
+    (parsed JSON, not `ConflictRecordEntry` instances) — indexed by key,
+    not by attribute."""
+    if not records:
+        return (0, 0)
+    created = dt.datetime.fromisoformat(surface.created_at)
+    now = dt.datetime.now(dt.timezone.utc)
+    midpoint = created + (now - created) / 2
+    earlier = sum(1 for r in records if dt.datetime.fromisoformat(r["created_at"]) < midpoint)
+    return (earlier, len(records) - earlier)
+
+
 def detect_mirror_drift(surface: Surface, db_path: str = db.DEFAULT_DB_PATH) -> MirrorDriftAssessment:
     """Section 4.2. Honesty note: two of the four documented indicators
     ('self-model producing outputs that match approval markers' and
     'divergence between self-model predictions and objective outcomes')
-    require semantic/outcome analysis this module does not have inputs for
-    yet — they are not faked here. What IS implemented, because it is a
-    structural fact about stored counters, is the first indicator:
-    confidence/confirmation climbing while corrections have gone quiet.
-    That is a real, if partial, signal — treat a clean result from this
-    function as 'no structural indicator found', not as 'mirror drift ruled
-    out'.
+    require semantic/outcome analysis and an outcome-tracking data model
+    this codebase does not define yet — they are not faked here. What IS
+    implemented, because both are structural facts about stored counters
+    and timestamps, are indicators 1 and 2:
+
+      1. Confidence/confirmation climbing with zero corrections ever
+         recorded — the model is not being tested, only confirmed.
+      2. Corrections tapering off over the surface's own lifetime while
+         confirmations keep climbing — a real time-series comparison of
+         the conflict record's timestamps, not a semantic judgment. Per
+         Section 3.5's Non-Interpretation Rule elsewhere in this document,
+         this function does not decide WHY the rate dropped (genuine
+         learning vs. approval-seeking) — it only detects and surfaces the
+         structural pattern; Section 4.3 reserves that determination for
+         the operator explicitly ('the operator determines what the
+         pattern means').
+
+    Treat a clean result from this function as 'no structural indicator
+    found', not as 'mirror drift ruled out'.
     """
     indicators: list[str] = []
     records = db.list_conflict_records(surface.surface_id, db_path)
+
     if surface.state == ConfidenceState.EXECUTABLE and surface.confirmation_count >= 5 and len(records) == 0:
         indicators.append(
             "confidence/confirmation climbing with zero corrections on record — "
             "model is not being tested, only confirmed (Section 4.2, indicator 1)"
         )
+
+    if len(records) >= 2:
+        earlier, later = _corrections_split_at_midpoint(surface, records)
+        if earlier > 0 and later < earlier and surface.confirmation_count >= 5:
+            indicators.append(
+                f"corrections tapering over time ({earlier} earlier vs {later} more recent on record) "
+                "while confirmations keep climbing, no interpretation applied — operator determines "
+                "whether this reflects genuine learning or approval-seeking (Section 4.2, indicator 2)"
+            )
+
     if indicators:
         write_event("MIRROR_DRIFT_FLAGGED", {"surface_id": surface.surface_id, "indicators": indicators})
     return MirrorDriftAssessment(indicators=indicators)
