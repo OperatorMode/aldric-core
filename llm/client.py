@@ -22,8 +22,8 @@ try:
 except ImportError:  # pragma: no cover - exercised only if dependency missing
     anthropic = None  # type: ignore
 
-DEFAULT_MODEL = os.environ.get("ALDRIC_PRIMARY_MODEL", "claude-sonnet-4-20250514")
-SIDECAR_MODEL = os.environ.get("ALDRIC_SIDECAR_MODEL", "claude-3-5-haiku-20241022")
+DEFAULT_MODEL = os.environ.get("ALDRIC_PRIMARY_MODEL", "claude-sonnet-5")
+SIDECAR_MODEL = os.environ.get("ALDRIC_SIDECAR_MODEL", "claude-haiku-4-5-20251001")
 
 
 def _api_key() -> str:
