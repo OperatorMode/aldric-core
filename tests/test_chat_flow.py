@@ -11,7 +11,16 @@ import chat
 from core.apex_supervisor import HeuristicIDSDetector
 from core.ksp1_operator_kernel import AdjudicationStage
 from llm.governed_reply import GovernedTurnResult
+from models.schemas import KSPFinalityResult, KSPOutcome
 from storage import db
+
+
+def _fake_ksp_finality_pass_through(dsd, candidate_claim):
+    """A stand-in for core.ksp_finality.run_ksp_finality that clears every
+    time without changing the text — used by tests that aren't exercising
+    KSP behaviour itself, so their existing assertions about the exact
+    artifact text keep holding."""
+    return KSPFinalityResult(dsd_ref=dsd.dsd_id, outcome=KSPOutcome.CLEARED, compaction_text=candidate_claim)
 
 
 def _complete_interview_step(conversation):
@@ -100,6 +109,7 @@ def test_permanent_category_turn_requires_two_confirmations(monkeypatch, capsys)
         return pricing_result
 
     monkeypatch.setattr(chat, "run_governed_turn", _fake_governed_turn)
+    monkeypatch.setattr(chat, "run_ksp_finality", _fake_ksp_finality_pass_through)
     monkeypatch.setattr(
         "builtins.input",
         _scripted_inputs(
@@ -137,6 +147,7 @@ def test_rejecting_a_permanent_category_artifact_never_emits_it(monkeypatch, cap
         return pricing_result
 
     monkeypatch.setattr(chat, "run_governed_turn", _fake_governed_turn)
+    monkeypatch.setattr(chat, "run_ksp_finality", _fake_ksp_finality_pass_through)
     monkeypatch.setattr(
         "builtins.input",
         _scripted_inputs("confirmed", "what should we charge", "rejected", "exit"),

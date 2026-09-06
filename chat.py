@@ -14,9 +14,11 @@ Stack Mode" table:
     4. All six fields mapped -> reflected back verbatim -> operator confirms
     5. DSD locked
     6-11. Governed reasoning turns, each citing the locked DSD; anything
-          Finality-scope or touching a Permanent Tier C category goes
-          through the Adjudication Buffer, with the two-stage confirmation
-          for permanent-category artifacts
+          Finality-scope or touching a Permanent Tier C category first
+          clears the KSP Finality sequence (core/ksp_finality.py — Phases
+          1-3 and 5; Phase 6 is the Adjudication Buffer immediately below),
+          then goes through the Adjudication Buffer, with the two-stage
+          confirmation for permanent-category artifacts
     12. Operator may feed a ratified output back to ALDRIC's self-model —
         not wired up in this skeleton (that requires a running ALDRIC-Mode
         instance to feed; see PA Action Kernel/Learning Governance).
@@ -28,11 +30,13 @@ Requires ANTHROPIC_API_KEY or Aldric-API in the environment. Run:
 """
 from __future__ import annotations
 
+import dataclasses
 import sys
 
 from core.apex_supervisor import IDSDetector, apply_apex_response
 from core.ksp0_dsd import DSDGate, DSDGateError, build_dsd
 from core.ksp1_operator_kernel import AdjudicationBuffer
+from core.ksp_finality import run_ksp_finality
 from core.pa_action_kernel import generate_daily_digest, log_digest_entry
 from llm.dsd_interview import run_interview_step
 from llm.governed_reply import run_governed_turn
@@ -41,7 +45,9 @@ from models.schemas import (
     AdjudicationRecord,
     ConfirmationResult,
     DSDField,
+    KSPOutcome,
     PERMANENT_TIER_C_CATEGORIES,
+    Tier,
     classify_confirmation,
 )
 from storage import db
@@ -283,6 +289,29 @@ def main() -> None:
             continue
 
         if result.requires_adjudication:
+            ksp_result = None
+            if result.self_reported_scope == "finality" or result.touches_permanent_tier_c:
+                ksp_result = run_ksp_finality(dsd, result.output_text)
+
+            permanent_gate_applies = result.touches_permanent_tier_c or result.tool_effective_tier == Tier.C
+
+            if ksp_result is not None and ksp_result.outcome == KSPOutcome.DOWNGRADED_TO_VALIDATION:
+                print(f"\n[KSP] {ksp_result.downgrade_reason}")
+                if not permanent_gate_applies:
+                    print("Forced downgrade to Validation scope — not treated as Finality; "
+                          "showing as an ordinary reply.")
+                    print(f"\nALDRIC: {result.output_text}")
+                    conversation.append({"role": "assistant", "content": result.output_text})
+                    continue
+                print("Still held for adjudication: this touches a Permanent Tier C category, "
+                      "which requires confirmation regardless of KSP's own outcome.")
+            elif ksp_result is not None and ksp_result.outcome == KSPOutcome.CONDITIONAL:
+                unresolved = [f.unknown for f in ksp_result.unknown_audit if not f.resolved]
+                print(f"\n[KSP] Conditional — depends on unresolved unknown(s): {unresolved}")
+
+            if ksp_result is not None and ksp_result.outcome != KSPOutcome.DOWNGRADED_TO_VALIDATION:
+                result = dataclasses.replace(result, output_text=ksp_result.compaction_text)
+
             final_text = _handle_adjudication(buffer, dsd.dsd_id, result)
             if final_text is None:
                 continue

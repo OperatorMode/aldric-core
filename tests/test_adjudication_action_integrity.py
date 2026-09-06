@@ -32,8 +32,12 @@ import chat
 from core.apex_supervisor import HeuristicIDSDetector
 from core.ksp1_operator_kernel import AdjudicationBuffer, AdjudicationError
 from llm.governed_reply import GovernedTurnResult
-from models.schemas import AdjudicationRecord, AdjudicationStage, Tier
+from models.schemas import AdjudicationRecord, AdjudicationStage, KSPFinalityResult, KSPOutcome, Tier
 from storage import db
+
+
+def _fake_ksp_finality_pass_through(dsd, candidate_claim):
+    return KSPFinalityResult(dsd_ref=dsd.dsd_id, outcome=KSPOutcome.CLEARED, compaction_text=candidate_claim)
 
 
 def _complete_interview_step(conversation):
@@ -236,6 +240,7 @@ def test_end_to_end_operator_actually_sees_the_proposed_tool_call_before_confirm
         return pricing_result
 
     monkeypatch.setattr(chat, "run_governed_turn", _fake_governed_turn)
+    monkeypatch.setattr(chat, "run_ksp_finality", _fake_ksp_finality_pass_through)
     monkeypatch.setattr(
         "builtins.input",
         _scripted_inputs(

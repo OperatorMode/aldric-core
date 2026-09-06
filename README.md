@@ -28,7 +28,7 @@ runs regardless of what the model says about itself.
 | `01_KSP-0_DSD.md` | `core/ksp0_dsd.py`, `llm/dsd_interview.py`, `chat.py` | Deterministic: six-field schema, completeness test, confirmation-vocabulary matching, immutability lock, and the reflection-back step (done by formatting the locked fields, not by asking the model to re-describe its own extraction). LLM step: `llm/dsd_interview.py` runs the actual conversational Discovery Loop, one turn at a time, and only ever returns proposed field values — never a confirmation. |
 | `02_K1_Safety_Kernel.md` | `core/k1_safety.py` | Deterministic: precedence ordering, injection-pattern tripwire, no on/off switch anywhere in the codebase. Real safety/honesty behaviour is still the underlying model's own — this codebase cannot and does not claim to replace that. |
 | `03_APEX_Supervisor.md` | `core/apex_supervisor.py`, `llm/sidecar.py` | Deterministic: the response to a drift finding (force Validation scope, block output, log, notify) is fixed regardless of which detector fired. LLM step: the actual IDS-marker detection is a second model call (the Sidecar Auditor) — a `HeuristicIDSDetector` fallback exists for offline/test use and is explicitly weaker. |
-| `04_Operator_Kernel_KSP1.md` | `core/ksp1_operator_kernel.py` | Deterministic: Loop Manager state machine, single-active-loop rule, session hard-stop conditions, the Adjudication Buffer, and — most importantly — the Tier C two-stage confirmation gate. Explicitly NOT implemented as literal math: the Mode/Layer vocabulary and the KSP Finality phases' `D_KL`/"EGT manifold" language, which the source document itself calls "just language, no claim of truth." |
+| `04_Operator_Kernel_KSP1.md` | `core/ksp1_operator_kernel.py`, `core/ksp_finality.py`, `llm/ksp_finality.py` | Deterministic: Loop Manager state machine, single-active-loop rule, session hard-stop conditions, the Adjudication Buffer, the Tier C two-stage confirmation gate, and — as of this rebuild's KSP Finality orchestration — the Keystone check (an unlocked/unconfirmed DSD refuses Phase 1 outright), the Convergence Gate (a real AND of three independent Validation Thread pass/fail judgments), the Integrity Gate's three-boolean AND, and the Unknown Variable Audit's forced-conditional banner. LLM steps, each a real separate model call: Structural Projection, the three Validation Threads, the Integrity Gate audit, and Compaction (`llm/ksp_finality.py`). Explicitly NOT implemented as literal math: the Mode/Layer vocabulary, Phase 2 Thread 3's "EGT manifold" ratio, and Phase 4's `D_KL` formula — the source document's own invented vocabulary for reasoning posture; the Convergence Gate is instead implemented honestly as thread-agreement, not a synthetic divergence number. |
 | `05_PA_Action_Kernel.md` | `core/pa_action_kernel.py`, `core/permanent_category_scan.py` | Deterministic: Tier A/B/C classification for named tools (ALDRIC Mode), and critically, the Permanent Tier C Exceptions check, which runs first and cannot be reached by any mutation path from the API. `permanent_category_scan.py` extends the same category set to free text (used by `chat.py`, since a chat reply has no tool name to look up). LLM step (stubbed): genuine semantic surface matching — `NullSurfaceMatcher` always returns "no match," which is the *safe* default (Tier C), not a real matcher. This kernel is inert in Governance Stack Mode (`chat.py`'s mode) per the source document itself. |
 | `06_Learning_Governance.md` | `core/learning_governance.py` | Deterministic: signal-type intake rejection of non-operational-truth signal, the Correction Absolute (`apply_correction` has no confidence-gated bypass), the Structural Floor as unreachable Python constants. Partial: mirror-drift detection implements one of the four documented indicators structurally; the other three need outcome-tracking inputs this skeleton doesn't yet collect. |
 | `07_Operator_Profiles.md` | `core/operator_profiles.py` | Intentionally NOT a governance layer, per the source document itself — calibration templates only. |
@@ -40,7 +40,7 @@ Run it:
 
 ```bash
 pip install -r requirements.txt
-pytest                    # 45 tests, all deterministic, no network calls
+pytest                    # 78 tests, all deterministic, no network calls
 uvicorn main:app --reload # http://127.0.0.1:8000/docs for interactive API
 
 export ANTHROPIC_API_KEY=sk-ant-...   # or Aldric-API, matching the Windows machine's existing var
@@ -129,13 +129,19 @@ This is a governance *kernel*, not a finished ALDRIC. To go further:
    corresponding correction" indicator is implemented. The other three
    need an outcome-tracking data model this skeleton doesn't define yet, and
    only apply once ALDRIC Mode's surfaces exist.
-4. **KSP Finality phase orchestration.** `chat.py`'s governed turns produce
-   one LLM response per message rather than running the full Structural
-   Projection / Parallel Validation / Integrity Gate / Compaction sequence
-   as distinct reasoning phases. The Adjudication Buffer gate around the
-   output is real either way; the multi-phase pipeline itself is future work
-   if you want the phases to be genuinely distinct reasoning passes rather
-   than one call.
+4. ~~KSP Finality phase orchestration.~~ **Done.** `chat.py` now runs the
+   full Structural Projection / Validation Threads / Integrity Gate /
+   Unknown Variable Audit / Compaction sequence (`core/ksp_finality.py`,
+   `llm/ksp_finality.py`) as genuinely distinct reasoning passes before any
+   Finality-scope or permanent-category artifact reaches the Adjudication
+   Buffer — six extra model calls on a Finality turn (on top of the primary
+   reply and the Sidecar IDS check), a real spend/latency cost accepted in
+   exchange for the actual phase separation Section 3.1 specifies rather
+   than one call self-reporting everything. The real ratified documents now
+   live in `docs/stack/` — building this without them would have meant
+   guessing at what Structural Projection/Validation/Integrity Gate/
+   Compaction concretely check for, which is exactly the "theater dressed
+   as rigor" this project exists to avoid.
 5. **ALDRIC Mode itself.** Everything built so far is either mode-agnostic
    core or specifically wired for Governance Stack Mode (`chat.py`). Actual
    autonomous operation — triggers arriving without the operator present,

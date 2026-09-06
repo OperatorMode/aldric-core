@@ -338,3 +338,89 @@ class AdjudicationRecord(BaseModel):
     tool_effective_tier: Optional[Tier] = None
     permanent_categories: frozenset[str] = frozenset()
     action_hash: str = ""
+
+
+# ---------------------------------------------------------------------------
+# KSP — Finality & Integrity Engine  (04_Operator_Kernel_KSP1.md Section 3)
+# ---------------------------------------------------------------------------
+#
+# Section 3.1: "No artifact reaches the Adjudication Buffer without clearing
+# the DSD Fuse and every subsequent phase." These models carry the real
+# output of Phases 1-3 and 5 (Structural Projection, Validation Threads,
+# Integrity Gate, Compaction) — see core/ksp_finality.py and
+# llm/ksp_finality.py for what's genuinely computed vs. genuinely an LLM
+# reasoning step, and why Phase 2 Thread 3 (EGT Manifold) and Phase 4
+# (D_KL Convergence Gate) are deliberately NOT implemented as literal math.
+
+class KSPOutcome(str, Enum):
+    CLEARED = "cleared"                             # a real Finality artifact
+    CONDITIONAL = "conditional"                      # cleared, but depends on an unresolved unknown
+    DOWNGRADED_TO_VALIDATION = "downgraded_to_validation"  # Keystone Failure or Convergence Gate failure
+
+
+class StructuralProjection(BaseModel):
+    """Phase 1. Reframes the candidate claim into a constraint surface bound
+    to the locked Decision Surface — actors, incentives, invariants, and
+    unknowns. A real LLM reasoning step (Section 3.1); this module's only
+    job is to refuse to run it at all against an unlocked/unconfirmed DSD."""
+
+    actors: list[str] = Field(default_factory=list)
+    incentives: list[str] = Field(default_factory=list)
+    invariants: list[str] = Field(default_factory=list)
+    unknowns: list[str] = Field(default_factory=list)
+
+
+class ValidationThreadResult(BaseModel):
+    """One of Phase 2's three named trajectories (Section 3.1: Coherence,
+    Security, Cooperation). Deliberately a plain pass/fail reasoning
+    judgment with rationale, never a synthetic divergence number or
+    manifold ratio — see core/ksp_finality.py's module docstring."""
+
+    thread: str  # "coherence" | "security" | "cooperation"
+    passed: bool
+    rationale: str
+
+
+class IntegrityGateResult(BaseModel):
+    """Phase 3 (Section 3.1): Keystone Identification, Forward/Inverse
+    Symmetry, Domain Closure. Three independent structural booleans,
+    deterministically ANDed by core.ksp_finality.audit_integrity_passed —
+    never taken on the LLM's own summary judgment alone."""
+
+    keystone_stable: bool
+    forward_inverse_consistent: bool
+    domain_closure_ok: bool
+    rationale: str
+
+
+class UnknownAuditFinding(BaseModel):
+    """One unknown declared in Phase 1, checked against the emerging
+    artifact before Compaction (Section 3.1's 'Unknown Variable Audit').
+    core.ksp_finality treats ANY unresolved declared unknown as sufficient
+    to force the Conditional outcome — a conservative simplification of
+    'the artifact's core recommendation depends on it', made explicit here
+    rather than silently assumed."""
+
+    unknown: str
+    resolved: bool
+
+
+class KSPFinalityResult(BaseModel):
+    """The complete record of one Finality pass — everything Phases 1-3 and
+    5 produced, plus the outcome that decides what happens next in
+    chat.py: CLEARED/CONDITIONAL artifacts proceed to the (unchanged, already
+    real) Adjudication Buffer; DOWNGRADED_TO_VALIDATION artifacts do not,
+    unless a Permanent Tier C category independently requires adjudication
+    regardless of KSP's own outcome (that gate is unconditional per
+    PA Action Kernel Section 3.3 / CLAUDE.md Section 2 — KSP downgrading the
+    Finality *claim* never excuses the separate, unconditional permanent-
+    category gate)."""
+
+    dsd_ref: str
+    outcome: KSPOutcome
+    projection: Optional[StructuralProjection] = None
+    validation_threads: list[ValidationThreadResult] = Field(default_factory=list)
+    integrity_gate: Optional[IntegrityGateResult] = None
+    unknown_audit: list[UnknownAuditFinding] = Field(default_factory=list)
+    compaction_text: str = ""
+    downgrade_reason: Optional[str] = None

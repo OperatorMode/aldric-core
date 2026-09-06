@@ -1,9 +1,11 @@
 # ALDRIC Engineering Constraints
 
 These constraints govern anyone (human or AI) writing code in this repository.
-They are derived directly from the eight ratified governance documents
-(`docs/stack/01`–`08`, not included in this delivery — copy your originals in
-under `docs/stack/` if you want them alongside the code) and from the lesson
+They are derived directly from the eight ratified governance documents,
+which now live in `docs/stack/01`–`08` alongside this code (originally copied
+in from the operator's own source folder on 6 Sept 2026 — keep this
+directory in sync with any future amendment to those documents), and from
+the lesson
 this project already learned the hard way: a rule that only lives in a prompt
 is a rule a long enough session, a confident-sounding drift, or a well-worded
 injection can talk past. A rule that lives in a Python module a request must
