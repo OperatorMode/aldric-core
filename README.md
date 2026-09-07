@@ -49,6 +49,16 @@ export ANTHROPIC_API_KEY=sk-ant-...   # or Aldric-API, matching the Windows mach
 python aldric_chat.py     # ALDRIC Mode — casual chat, no DSD until something needs one, terminal
 python chat.py             # Governance Stack Mode — DSD required upfront, terminal chat
 python webapp.py           # Governance Stack Mode, browser UI at http://127.0.0.1:8000
+
+python demos/live_session_demo.py  # no API key, no Google credentials, no network —
+                                    # a scripted operator + scripted model reply walk the real
+                                    # aldric_chat.py code through a full conversation (memory,
+                                    # the confidence cascade's four reflective outcomes, First
+                                    # Executable Crossing, Tier A/B tool execution, the digest)
+                                    # and print exactly what the real code actually did. See
+                                    # that file's own docstring for two real findings it
+                                    # surfaced this way — not hypothetical, reproduced by
+                                    # running it.
 ```
 
 ## Using ALDRIC Mode (`aldric_chat.py`)
