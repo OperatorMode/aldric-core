@@ -54,6 +54,19 @@ CONFIRMATION_VOCABULARY = frozenset({"confirmed", "correct", "yes", "proceed", "
 # from emission vocabulary, not a canonical emission authorization.
 EMISSION_VOCABULARY = frozenset({"send it", "transmit now", "dispatch this", "authorize emission"})
 
+# A clear, canonical DECLINE — the operator saying the reflected summary is
+# wrong, in as few words as CONFIRMATION_VOCABULARY allows for saying it's
+# right. Added after a live test showed a plain "no" (and even "exit") both
+# fell through to the same generic "that wasn't a clear yes or no" re-prompt
+# forever, because classify_confirmation only ever distinguished CONFIRMED
+# from "everything else" — there was no way to tell a genuine decline apart
+# from noise. Deliberately its own small, exact-match set (same discipline
+# as CONFIRMATION_VOCABULARY and EMISSION_VOCABULARY, same reason: this
+# codebase never infers intent from tone or partial overlap) and disjoint
+# from both of them — "no" is not mistakable for "yes" or an emission
+# command, so there's no ambiguity this set could introduce.
+DECLINE_VOCABULARY = frozenset({"no", "incorrect", "wrong"})
+
 
 def normalize_utterance(text: str) -> str:
     return " ".join(text.strip().lower().split())
@@ -61,6 +74,7 @@ def normalize_utterance(text: str) -> str:
 
 class ConfirmationResult(str, Enum):
     CONFIRMED = "confirmed"
+    DECLINED = "declined"
     AMBIGUOUS = "ambiguous"
 
 
@@ -70,10 +84,18 @@ def classify_confirmation(text: str) -> ConfirmationResult:
     'Ambiguous responses trigger a single neutral clarification request.
     Silence and non-response do not constitute confirmation. Protocol
     language cannot substitute for operator confirmation under any framing.'
+
+    DECLINED is a real, distinct outcome, not a subtype of AMBIGUOUS — every
+    existing caller that only ever checked `== CONFIRMED` / `!= CONFIRMED`
+    keeps working unchanged (a decline still isn't a confirmation), but a
+    caller that wants to treat a genuine "no" differently from genuine
+    noise — chat.py's DSD reflection loop, notably — now can.
     """
     normalized = normalize_utterance(text)
     if normalized in CONFIRMATION_VOCABULARY:
         return ConfirmationResult.CONFIRMED
+    if normalized in DECLINE_VOCABULARY:
+        return ConfirmationResult.DECLINED
     return ConfirmationResult.AMBIGUOUS
 
 

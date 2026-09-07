@@ -7,11 +7,13 @@ never gets hit — before ever running it against a live API key.
 """
 import itertools
 
+import pytest
+
 import chat
 from core.apex_supervisor import HeuristicIDSDetector
 from core.ksp1_operator_kernel import AdjudicationStage
 from llm.governed_reply import GovernedTurnResult
-from models.schemas import KSPFinalityResult, KSPOutcome
+from models.schemas import ConfirmationResult, KSPFinalityResult, KSPOutcome, classify_confirmation
 from storage import db
 
 
@@ -65,6 +67,71 @@ def test_ambiguous_then_clear_confirmation(monkeypatch):
     monkeypatch.setattr("builtins.input", _scripted_inputs("not sure honestly", "confirmed"))
 
     dsd = chat.run_dsd_discovery()
+    assert dsd.locked is True
+
+
+def test_classify_confirmation_distinguishes_decline_from_ambiguous_noise():
+    """A live test against a real model surfaced that a plain "no" (and even
+    "exit") both fell through to the same generic "not a clear yes or no"
+    re-prompt as pure noise — root cause was classify_confirmation only
+    ever distinguishing CONFIRMED from "everything else." DECLINED is a
+    real third outcome now, exact-match only, same discipline as
+    CONFIRMATION_VOCABULARY — a verbose sentence that merely contains "no"
+    still doesn't count, same as a verbose sentence that merely contains
+    "yes" never counted as CONFIRMED."""
+    assert classify_confirmation("no") == ConfirmationResult.DECLINED
+    assert classify_confirmation("Incorrect") == ConfirmationResult.DECLINED
+    assert classify_confirmation("wrong") == ConfirmationResult.DECLINED
+    assert classify_confirmation("not sure honestly") == ConfirmationResult.AMBIGUOUS
+    assert classify_confirmation("no, that's totally wrong") == ConfirmationResult.AMBIGUOUS
+    assert classify_confirmation("confirmed") == ConfirmationResult.CONFIRMED
+
+
+def test_exit_during_dsd_reflection_ends_the_session_without_locking(monkeypatch, capsys):
+    """Found live: typing 'exit' at the "Is that correct?" prompt used to
+    just be treated as more ambiguous noise and re-prompted forever — the
+    only documented way out was one of the five exact confirmation words."""
+    monkeypatch.setattr(chat, "run_interview_step", _complete_interview_step)
+    monkeypatch.setattr(chat, "_build_ids_detector", lambda: HeuristicIDSDetector())
+    monkeypatch.setattr("builtins.input", _scripted_inputs("exit"))
+
+    with pytest.raises(SystemExit):
+        chat.run_dsd_discovery()
+    out = capsys.readouterr().out
+    assert "nothing was locked" in out
+
+
+def test_exit_during_dsd_interview_also_ends_the_session(monkeypatch, capsys):
+    def _incomplete_interview_step(conversation):
+        return {
+            "extracted_fields": {},
+            "missing_fields": ["decision_locus"],
+            "next_utterance": "What are we deciding?",
+        }
+
+    monkeypatch.setattr(chat, "run_interview_step", _incomplete_interview_step)
+    monkeypatch.setattr(chat, "_build_ids_detector", lambda: HeuristicIDSDetector())
+    monkeypatch.setattr("builtins.input", _scripted_inputs("exit"))
+
+    with pytest.raises(SystemExit):
+        chat.run_dsd_discovery()
+    out = capsys.readouterr().out
+    assert "nothing was locked" in out
+
+
+def test_a_plain_no_declines_and_restarts_discovery_instead_of_looping_forever(monkeypatch, capsys):
+    """The other half of the same live-test finding: a genuine "no" now goes
+    back to re-establish the DSD correctly — reusing the exact same
+    reprint-the-banner-and-recur recovery path a DSDGateError already used a
+    few lines above in chat.py, not a second restart mechanism — instead of
+    being trapped in an infinite "that wasn't a clear yes or no" loop."""
+    monkeypatch.setattr(chat, "run_interview_step", _complete_interview_step)
+    monkeypatch.setattr(chat, "_build_ids_detector", lambda: HeuristicIDSDetector())
+    monkeypatch.setattr("builtins.input", _scripted_inputs("no", "confirmed"))
+
+    dsd = chat.run_dsd_discovery()
+    out = capsys.readouterr().out
+    assert "Understood — that's not right" in out
     assert dsd.locked is True
 
 

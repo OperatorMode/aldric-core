@@ -96,6 +96,9 @@ def run_dsd_discovery(
         except (EOFError, KeyboardInterrupt):
             print("\nSession abandoned during DSD Discovery.")
             sys.exit(0)
+        if answer.strip().lower() in ("exit", "quit"):
+            print("\nSession ended during DSD Discovery — nothing was locked.")
+            sys.exit(0)
         conversation.append({"role": "assistant", "content": question})
         conversation.append({"role": "user", "content": answer})
 
@@ -126,6 +129,15 @@ def run_dsd_discovery(
         except (EOFError, KeyboardInterrupt):
             print("\nSession abandoned before confirmation.")
             sys.exit(0)
+        # Found live: neither "exit" nor a plain "no" broke out of this loop
+        # before — classify_confirmation only ever distinguished CONFIRMED
+        # from "everything else," so both fell through to the generic
+        # re-prompt below, forever, with no way out except one of the five
+        # exact confirmation words. Checked before classification, same as
+        # every other input() site in this codebase already handles exit.
+        if utterance.strip().lower() in ("exit", "quit"):
+            print("\nSession ended before the Decision Surface was confirmed — nothing was locked.")
+            sys.exit(0)
         result = classify_confirmation(utterance)
         if result == ConfirmationResult.CONFIRMED:
             try:
@@ -135,6 +147,27 @@ def run_dsd_discovery(
                 return locked
             except DSDGateError as exc:
                 print(f"\n{exc}")
+        elif result == ConfirmationResult.DECLINED:
+            # A genuine "no" — not noise, not a re-ask. Section 8.3's
+            # immutability is about a LOCKED DSD; nothing here is locked
+            # yet, so there's no rule being bent by going back to establish
+            # it correctly. Reuses the exact same "reprint the banner, recur
+            # with the accumulated conversation" recovery path a few lines
+            # above already uses for a DSDGateError — one restart mechanism,
+            # not two — so nothing gathered so far (including this decline)
+            # is thrown away; the model tries again with it in context.
+            print("\nUnderstood — that's not right. Let's go back over what needs to change.\n")
+            summary_lines = [
+                f'{FIELD_LABELS[field.value]}: '
+                f'{"; ".join(getattr(dsd, field.value)) if isinstance(getattr(dsd, field.value), list) else getattr(dsd, field.value)}'
+                for field in DSDField
+            ]
+            conversation.append({
+                "role": "assistant",
+                "content": "Here is what I understood: " + "; ".join(summary_lines),
+            })
+            conversation.append({"role": "user", "content": utterance})
+            return run_dsd_discovery(seed_conversation=conversation)
         else:
             print("\nThat wasn't a clear yes or no in your own words — please confirm plainly (e.g. 'confirmed', 'yes').")
 
