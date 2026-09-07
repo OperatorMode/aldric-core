@@ -33,6 +33,16 @@ a way to game the gate (alternate casual/governed messages hoping a
 commitment slips through labelled "casual"). Start a new session for a
 fresh casual conversation.
 
+Also wires Learning Governance (core/surface_signal.py) into this same loop:
+answering a clarifying question is Instruction/Correction Signal on the
+scope's Surface; the operator's next turn is checked for canonical
+confirmation vocabulary (models.schemas.classify_confirmation — the same
+deterministic check Governance Stack Mode uses for Tier C ratification, not
+ALDRIC's own read of how the turn went) and, if it matches, recorded as real
+Confirmation Signal. See core/surface_signal.py's module docstring for why
+this doesn't need the still-open real surface matcher (README gap-list item
+1) to do this honestly.
+
 Requires ANTHROPIC_API_KEY or Aldric-API in the environment. Run:
 
     export ANTHROPIC_API_KEY=sk-ant-...
@@ -42,8 +52,9 @@ from __future__ import annotations
 
 import chat  # reuse Governance Stack Mode's DSD discovery + governed session loop rather than duplicating them
 import core.long_term_memory as long_term_memory
+import core.surface_signal as surface_signal
 from llm.aldric_reply import run_casual_turn
-from models.schemas import PERMANENT_TIER_C_CATEGORIES, Tier
+from models.schemas import PERMANENT_TIER_C_CATEGORIES, ConfirmationResult, Tier, classify_confirmation
 from storage import db
 
 
@@ -94,6 +105,13 @@ def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None
     operator exit; raises _Escalate the moment a turn requires handing off
     to Governance Stack Mode."""
     conversation = conversation if conversation is not None else []
+    # Set at the end of a turn whose reply drew on a real Surface — the very
+    # next operator message is checked against canonical confirmation
+    # vocabulary before it's treated as anything else. Cleared every time it
+    # is checked, whether or not it matched: only the immediately-next turn
+    # counts (Learning Governance Section 2.2's "operator uses ALDRIC's
+    # output ... " is about that output, not something several turns back).
+    pending_scope = ""
 
     print("=" * 70)
     print("ALDRIC — ALDRIC Mode (casual)")
@@ -111,6 +129,20 @@ def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None
 
         if user_message.strip().lower() in ("exit", "quit"):
             return
+
+        if pending_scope:
+            scope_to_confirm, pending_scope = pending_scope, ""
+            if classify_confirmation(user_message) == ConfirmationResult.CONFIRMED:
+                confirmed_surface = surface_signal.record_confirmation(scope_to_confirm)
+                if confirmed_surface is not None:
+                    print(
+                        f'[ALDRIC] Noted — confirmed for "{confirmed_surface.surface_id}" '
+                        f'(now {confirmed_surface.state.value}, '
+                        f'{confirmed_surface.confirmation_count} confirmation(s) on record).'
+                    )
+                    continue
+                # Nothing on record for that scope to confirm — fall through
+                # and treat this message as an ordinary turn instead.
 
         try:
             result = run_casual_turn(conversation, user_message)
@@ -135,7 +167,9 @@ def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None
                 return
 
             scope = result.memory_scope or "general"
+            had_prior = long_term_memory.get_preference(scope) is not None
             long_term_memory.set_preference(scope, answer)
+            surface_signal.record_instruction_or_correction(scope, answer, had_prior_preference=had_prior)
             print(f'[ALDRIC] Remembered that for next time (under "{scope}") — won\'t need to ask again.')
             conversation.append({"role": "user", "content": answer})
 
@@ -149,7 +183,12 @@ def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None
                 _announce_and_escalate(conversation, result)
             # A second needs_clarification here isn't chased further — shown
             # as-is below rather than looping again, so one user turn can't
-            # turn into an unbounded back-and-forth.
+            # turn into an unbounded back-and-forth. The scope now has a real
+            # Surface behind it either way, so it's eligible for confirmation
+            # on the operator's next turn.
+            pending_scope = scope
+        elif result.related_scope:
+            pending_scope = result.related_scope
 
         display_text = result.output_text or result.clarifying_question or "(no reply)"
         print(f"\nALDRIC: {display_text}")

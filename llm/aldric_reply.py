@@ -26,7 +26,19 @@ needs_clarification/clarifying_question/memory_scope below. Unlike
 scope/touched_categories, these three are NOT governance-critical (they
 don't gate Tier C or DSD escalation, core.aldric_mode never looks at them),
 they're a plain quality signal, so trusting the model's self-report here is
-fine in a way it deliberately isn't for tier/category classification."""
+fine in a way it deliberately isn't for tier/category classification.
+
+Also carries `related_scope` (Learning Governance wiring, core/
+surface_signal.py): which known scope, if any, this reply actually drew on.
+Same "quality signal, not governance-critical" trust level as
+needs_clarification — and, unlike that field, additionally filtered against
+the real known-scope set below before it ever leaves this function, the same
+discipline already applied to touched_categories against
+PERMANENT_TIER_C_CATEGORIES. That filter matters here specifically because
+`related_scope` is what lets aldric_chat.py treat the operator's very next
+"yes, that's right" as real confirmation signal on a real Surface — an
+invented or mistaken scope name should fail closed into "nothing to
+confirm", not silently create one."""
 from __future__ import annotations
 
 import json
@@ -75,6 +87,12 @@ Classify your own response honestly:
   about (e.g. "client", "team", "boss", or something more specific) so the
   answer can be remembered under that scope and not asked again. If false,
   leave "clarifying_question" and "memory_scope" as empty strings.
+- "related_scope": if — and only if — your answer actually drew on one of
+  the known preferences/facts listed above, name that exact scope tag here
+  (e.g. "client:acme"), so the operator confirming your answer next turn can
+  be recorded as real confirmation of that specific standing preference.
+  Leave "" if you didn't actually use one of the known items above, or if
+  needs_clarification is true (nothing settled yet to confirm).
 
 Respond with ONLY this JSON:
 {{"output": "<your actual reply to the operator, or empty string if
@@ -82,7 +100,7 @@ needs_clarification is true — nothing final to say yet>",
 "scope": "exploration|validation|finality", "touched_categories": [...],
 "proposed_tool_call": {{"tool_name": "...", "arguments": {{...}}}} or null,
 "needs_clarification": true|false, "clarifying_question": "...",
-"memory_scope": "..."}}"""
+"memory_scope": "...", "related_scope": "..."}}"""
 
 
 def _format_known_memory(preferences, facts) -> str:
@@ -109,6 +127,7 @@ class CasualTurnResult:
     needs_clarification: bool = False
     clarifying_question: str = ""
     memory_scope: str = ""
+    related_scope: str = ""
 
     @property
     def requires_escalation(self) -> bool:
@@ -119,7 +138,10 @@ def run_casual_turn(conversation: list[dict[str, str]], user_message: str) -> Ca
     transcript = "\n".join(f"{t['role']}: {t['content']}" for t in conversation)
     full_user_message = f"{transcript}\nuser: {user_message}" if transcript else user_message
 
-    known_memory = _format_known_memory(long_term_memory.list_preferences(), long_term_memory.list_facts())
+    preferences = long_term_memory.list_preferences()
+    facts = long_term_memory.list_facts()
+    known_memory = _format_known_memory(preferences, facts)
+    known_scope_names = frozenset(p.scope for p in preferences) | frozenset(f.scope for f in facts)
     system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(known_memory=known_memory)
 
     # See llm/dsd_interview.py's run_interview_step for why this budget is
@@ -165,6 +187,15 @@ def run_casual_turn(conversation: list[dict[str, str]], user_message: str) -> Ca
         tool_argument_categories=tool_argument_categories,
         has_proposed_tool_call=has_proposed_tool_call,
     )
+
+    # Filtered against the real known-scope set for the same reason
+    # touched_categories is filtered against PERMANENT_TIER_C_CATEGORIES: an
+    # invented or misremembered scope name must not leak through and later
+    # be treated as something real to confirm (see module docstring).
+    related_scope = parsed.get("related_scope") or ""
+    if related_scope not in known_scope_names:
+        related_scope = ""
+
     return CasualTurnResult(
         output_text=output_text,
         signal=signal,
@@ -172,4 +203,5 @@ def run_casual_turn(conversation: list[dict[str, str]], user_message: str) -> Ca
         needs_clarification=bool(parsed.get("needs_clarification", False)),
         clarifying_question=parsed.get("clarifying_question") or "",
         memory_scope=parsed.get("memory_scope") or "",
+        related_scope=related_scope,
     )

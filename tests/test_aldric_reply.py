@@ -167,3 +167,37 @@ def test_needs_clarification_defaults_to_false_when_absent(monkeypatch):
     assert result.needs_clarification is False
     assert result.clarifying_question == ""
     assert result.memory_scope == ""
+
+
+# --- related_scope (Learning Governance wiring) ----------------------------
+
+def test_related_scope_passes_through_when_it_names_a_real_known_scope(monkeypatch):
+    long_term_memory.set_preference("client:acme", "Formal tone, no jokes.")
+    canned = {
+        "output": "Here's the formal draft.", "scope": "exploration", "touched_categories": [],
+        "proposed_tool_call": None, "related_scope": "client:acme",
+    }
+    monkeypatch.setattr(aldric_reply_module, "complete", _mock_complete(canned))
+    result = run_casual_turn(conversation=[], user_message="draft an email to Acme")
+    assert result.related_scope == "client:acme"
+
+
+def test_related_scope_is_dropped_when_it_names_a_scope_that_is_not_actually_known(monkeypatch):
+    """Same discipline as touched_categories being filtered against
+    PERMANENT_TIER_C_CATEGORIES: an invented or misremembered scope name
+    must fail closed rather than being treated as something real to
+    confirm later."""
+    canned = {
+        "output": "Sure.", "scope": "exploration", "touched_categories": [],
+        "proposed_tool_call": None, "related_scope": "client:not_a_real_scope",
+    }
+    monkeypatch.setattr(aldric_reply_module, "complete", _mock_complete(canned))
+    result = run_casual_turn(conversation=[], user_message="hello")
+    assert result.related_scope == ""
+
+
+def test_related_scope_defaults_to_empty_when_absent(monkeypatch):
+    canned = {"output": "Sure.", "scope": "exploration", "touched_categories": [], "proposed_tool_call": None}
+    monkeypatch.setattr(aldric_reply_module, "complete", _mock_complete(canned))
+    result = run_casual_turn(conversation=[], user_message="hello")
+    assert result.related_scope == ""

@@ -239,9 +239,10 @@ class DigestEntry(BaseModel):
 # section on its own; this is the operator's own extension, built from what
 # an earlier prompt-based ALDRIC was observed doing in real use — see
 # core/long_term_memory.py's module docstring for the full reasoning and the
-# distinction from Learning Governance's per-Surface confidence, which is a
-# separate, still-unbuilt third memory category blocked on a real surface
-# matcher).
+# distinction from Learning Governance's per-Surface confidence, a separate
+# third memory category that core/surface_signal.py now wires up for
+# scope-tagged surfaces without needing a real surface matcher — see that
+# module's docstring for why).
 # ---------------------------------------------------------------------------
 
 class StandingPreference(BaseModel):

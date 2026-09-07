@@ -36,11 +36,18 @@ A third, genuinely different memory concept — Learning Governance's
 per-Surface confidence, a number shaped by a history of corrections and
 confirmations without needing to recall the specific events that built it,
 the closest honest analogue this system has to human "experience" — already
-exists in core/learning_governance.py, but isn't wired up here: it needs a
-real Surface to attach to, which needs the real surface matcher
-core/pa_action_kernel.py's NullSurfaceMatcher stands in for today. That is
-still open work, tracked in the README gap list, not attempted in this
-module.
+exists in core/learning_governance.py. It doesn't live in this module (this
+module stays "just data operations" for preferences and facts only), but it
+is wired up now, in core/surface_signal.py: every scope this module already
+tracks (the same "client:acme"/"team"/"boss" tags used for
+memory_scope/related_scope) doubles as a Learning Governance Surface's
+identity, with no semantic surface matching required — the scope is already
+an explicit tag, not something to be inferred. That's a different, easier
+problem than core/pa_action_kernel.py's NullSurfaceMatcher (matching a
+brand-new, *untagged* situation against many candidate surfaces), which is
+still an open stub — see core/surface_signal.py's module docstring for the
+full distinction, and the README gap list for what that harder problem still
+blocks.
 
 This module is the deterministic storage-facing layer only — no LLM calls.
 llm/aldric_reply.py is what actually fetches from here before a casual turn

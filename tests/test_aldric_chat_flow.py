@@ -144,6 +144,91 @@ def test_clarification_round_trip_saves_preference_and_completes_original_reques
     assert saved.content == "Formal tone, no jokes"
 
 
+def test_clarification_answer_creates_a_real_surface_and_next_turn_confirms_it(monkeypatch, capsys):
+    """The full loop end to end: answering a clarifying question creates a
+    real Learning Governance Surface (not just a StandingPreference), and
+    the operator's very next "yes, perfect" is recorded as real confirmation
+    signal against it — proving core.surface_signal is actually wired into
+    aldric_chat.py's loop, not just independently testable."""
+    db.init_db()
+    first_result = CasualTurnResult(
+        output_text="",
+        signal=EscalationSignal(self_reported_scope="exploration"),
+        needs_clarification=True,
+        clarifying_question="What tone should I use for this client?",
+        memory_scope="client:acme",
+    )
+    follow_up_result = _casual_result("Here's your formal email draft for Acme.")
+    results = iter([first_result, follow_up_result])
+    monkeypatch.setattr(aldric_chat, "run_casual_turn", lambda conversation, user_message: next(results))
+    monkeypatch.setattr(
+        "builtins.input",
+        _scripted_inputs(
+            "write an email to Acme",
+            "Formal tone, no jokes",
+            "confirmed",
+            "exit",
+        ),
+    )
+
+    aldric_chat.main()
+    out = capsys.readouterr().out
+    assert 'Remembered that for next time (under "client:acme")' in out
+    assert 'Noted — confirmed for "client:acme"' in out
+
+    import core.surface_signal as surface_signal
+    from storage import db as storage_db
+    stored = storage_db.get_surface("client:acme")
+    assert stored is not None
+    assert stored["confirmation_count"] == 1
+    assert surface_signal.record_confirmation("client:acme").confirmation_count == 2
+
+
+def test_a_second_correction_for_the_same_scope_is_recorded_as_a_real_correction(monkeypatch, capsys):
+    """Answering a clarifying question a second time for a scope that
+    already has an established standing preference must go through
+    apply_correction (a real conflict record), not be treated as a second
+    fresh instruction."""
+    db.init_db()
+    first_result = CasualTurnResult(
+        output_text="",
+        signal=EscalationSignal(self_reported_scope="exploration"),
+        needs_clarification=True,
+        clarifying_question="What tone for this client?",
+        memory_scope="client:acme",
+    )
+    second_result = CasualTurnResult(
+        output_text="",
+        signal=EscalationSignal(self_reported_scope="exploration"),
+        needs_clarification=True,
+        clarifying_question="What tone for this client?",
+        memory_scope="client:acme",
+    )
+    follow_up_1 = _casual_result("Formal draft ready.")
+    follow_up_2 = _casual_result("Casual draft ready.")
+    results = iter([first_result, follow_up_1, second_result, follow_up_2])
+    monkeypatch.setattr(aldric_chat, "run_casual_turn", lambda conversation, user_message: next(results))
+    monkeypatch.setattr(
+        "builtins.input",
+        _scripted_inputs(
+            "write an email to Acme",
+            "Formal tone",
+            "write another email to Acme",  # not confirmation vocabulary -> falls through normally
+            "Actually, warmer and casual",
+            "exit",
+        ),
+    )
+
+    aldric_chat.main()
+
+    from storage import db as storage_db
+    records = storage_db.list_conflict_records("client:acme")
+    assert len(records) == 1
+    assert records[0]["operator_instruction"] == "Actually, warmer and casual"
+    stored = storage_db.get_surface("client:acme")
+    assert stored["description"] == "Actually, warmer and casual"
+
+
 def test_clarification_that_itself_escalates_hands_off_correctly(monkeypatch, capsys):
     """The follow-up turn after answering a clarifying question can still
     turn out to need Governance Stack Mode (e.g. the answer itself revealed

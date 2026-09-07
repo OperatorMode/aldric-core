@@ -31,6 +31,7 @@ from dataclasses import dataclass
 from enum import Enum
 
 from core.k1_safety import PRECEDENCE_ORDER
+from core.pa_action_kernel import log_digest_entry
 from models.schemas import (
     PERMANENT_TIER_C_CATEGORIES,
     ConfidenceState,
@@ -39,6 +40,12 @@ from models.schemas import (
 )
 from storage import db
 from storage.event_log import write_event
+
+# Section 3.5: "What constitutes clustering is defined during the calibration
+# pass... the threshold is operator-defined." No calibration pass has run
+# yet, so this is a starting default, not a claim it's the right number —
+# same posture as PA Action Kernel's assess_drift() thresholds.
+DEFAULT_PATTERN_CLUSTER_SIZE = 3
 
 
 # ---------------------------------------------------------------------------
@@ -136,6 +143,22 @@ def apply_correction(surface: Surface, operator_instruction: str, domain: str,
         "surface_id": surface.surface_id, "domain": domain,
         "model_held_before": model_held_before, "operator_instruction": operator_instruction,
     })
+
+    # Section 3.4 + 6.2: the self-model's visibility runs through the digest,
+    # not just the event log — this is what actually makes a correction
+    # observation reach `pa_action_kernel.generate_daily_digest()` rather than
+    # sitting as a dict nothing ever reads. Non-optional, unconditional, same
+    # as the write above.
+    log_digest_entry("correction_observation", individual_correction_observation(entry), db_path=db_path)
+
+    pattern = pattern_observation(
+        surface.surface_id, domain, cluster_size=DEFAULT_PATTERN_CLUSTER_SIZE,
+        window_description="since this surface's creation", db_path=db_path,
+    )
+    if pattern is not None:
+        log_digest_entry("pattern_observation", pattern, db_path=db_path)
+
+    _check_and_log_mirror_drift(surface, db_path)
     return surface, entry
 
 
@@ -170,6 +193,107 @@ def pattern_observation(surface_id: str, domain: str, cluster_size: int, window_
         "window": window_description,
         "note": "Pattern surfaced for operator determination. No interpretation applied.",
     }
+
+
+# ---------------------------------------------------------------------------
+# Component 2 (continued) — Confirmation Signal and confidence growth
+# ---------------------------------------------------------------------------
+
+# Section 2.2 describes confirmation as real signal but sets no numbers;
+# Section 5.4 already establishes the project's posture that thresholds like
+# this are operator-defined starting points awaiting the calibration pass,
+# not something this code should pretend to have derived. These are exactly
+# that: adjustable, not authoritative.
+DEFAULT_PROMOTION_THRESHOLDS = {"developing_at": 2, "executable_at": 5}
+
+
+def promote_surface_state(surface: Surface, thresholds: dict | None = None) -> Surface:
+    """Confidence state moves only on confirmation_count — never on
+    correction activity directly. Corrections stay visible through the
+    conflict record and mirror drift detection instead of nudging confidence
+    up or down by themselves; Section 3.3 is explicit that the conflict
+    record 'does not weight corrections against the model.' Mutates and
+    returns `surface`; does not persist it — callers that want the change
+    saved call `storage.db.save_surface` themselves (same shape as
+    `apply_mirror_drift_response`).
+
+    Never promotes past a SUSPENDED or RETIRED surface — those are
+    operator-set lifecycle states (Section 8.2), not something confirmation
+    volume should silently override."""
+    if surface.state in (ConfidenceState.SUSPENDED, ConfidenceState.RETIRED):
+        return surface
+    t = {**DEFAULT_PROMOTION_THRESHOLDS, **(thresholds or {})}
+    if surface.confirmation_count >= t["executable_at"]:
+        surface.state = ConfidenceState.EXECUTABLE
+    elif surface.confirmation_count >= t["developing_at"]:
+        surface.state = ConfidenceState.DEVELOPING
+    return surface
+
+
+def apply_confirmation(surface: Surface, thresholds: dict | None = None,
+                        db_path: str = db.DEFAULT_DB_PATH) -> Surface:
+    """Section 2.2, Confirmation Signal.
+
+    This function makes no judgment of its own about whether confirmation
+    actually happened. By the time anything reaches here, the caller
+    (`core.surface_signal`, driven by `aldric_chat.py`) has already
+    deterministically classified the operator's own raw utterance against
+    the same canonical confirmation vocabulary Governance Stack Mode uses for
+    Tier C content ratification (`models.schemas.classify_confirmation`).
+    That is the only thing this module ever accepts as confirmation — never
+    ALDRIC's own read of how a turn seemed to go. Section 6.3 is explicit:
+    ALDRIC 'cannot elevate its own confidence unilaterally.' Compare
+    `apply_correction()`'s complete lack of a resistance branch — this is the
+    same discipline applied to the opposite direction of signal."""
+    state_before = surface.state
+    surface.confirmation_count += 1
+    surface.updated_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    promote_surface_state(surface, thresholds)
+    db.save_surface(surface, db_path)
+    write_event("CONFIRMATION_APPLIED", {
+        "surface_id": surface.surface_id,
+        "confirmation_count": surface.confirmation_count,
+        "state": surface.state.value,
+    })
+
+    # Section 6.2: "current confidence states across active surfaces" is
+    # part of what the self-model exposes through the digest. Logged only on
+    # an actual transition, not on every confirmation that doesn't move the
+    # needle, for the same "don't spam the same fact every turn" reason
+    # mirror drift logging below only fires on the flip into flagged.
+    if surface.state != state_before:
+        log_digest_entry("confidence_change", {
+            "surface_id": surface.surface_id,
+            "previous_state": state_before.value,
+            "new_state": surface.state.value,
+            "confirmation_count": surface.confirmation_count,
+        }, db_path=db_path)
+
+    _check_and_log_mirror_drift(surface, db_path)
+    return surface
+
+
+def _check_and_log_mirror_drift(surface: Surface, db_path: str = db.DEFAULT_DB_PATH) -> None:
+    """Shared by `apply_correction` and `apply_confirmation` — both are
+    moments a confidence-relevant counter on this surface just changed, so
+    both are moments worth re-checking for drift, rather than waiting on a
+    separate batch job that doesn't exist. Only logs to the digest on the
+    transition into flagged (Section 4.3's notification requirement) — not
+    on every later turn the surface remains flagged, which would just fill
+    the digest with a repeat of the same observation. The flag itself still
+    persists on the Surface record regardless of whether this call logs
+    anything (see `apply_mirror_drift_response`)."""
+    already_flagged = surface.mirror_drift_flagged
+    assessment = detect_mirror_drift(surface, db_path)
+    apply_mirror_drift_response(surface, assessment, db_path)
+    if assessment.flagged and not already_flagged:
+        # "mirror_drift_flag" per models.schemas.DigestEntry's own category
+        # comment — matching that documented vocabulary, not inventing a
+        # fifth spelling of the same thing.
+        log_digest_entry("mirror_drift_flag", {
+            "surface_id": surface.surface_id,
+            "indicators": assessment.indicators,
+        }, db_path=db_path)
 
 
 # ---------------------------------------------------------------------------
