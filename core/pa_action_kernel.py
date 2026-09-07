@@ -82,7 +82,39 @@ TOOL_REGISTRY: dict[str, dict] = {
     "commit_deadline": {"permanent_categories": frozenset({"deadline_commitment"}), "external_facing": True, "reversible": False},
     "sign_contract": {"permanent_categories": frozenset({"contractual_terms_or_obligation", "binding_obligation"}), "external_facing": True, "reversible": False},
     "send_legal_correspondence": {"permanent_categories": frozenset({"legal_matter"}), "external_facing": True, "reversible": False},
+
+    # Real tools, wired to core.capability_broker (README gap-list item 9).
+    # Everything above this line was an example registered so classify_tier
+    # had something concrete to classify before any real capability existed;
+    # these are the first entries a matched, rights-confirmed surface can
+    # actually cause to run in the world. Permanent-category tags stay
+    # frozenset() here on purpose: a real pricing/deadline/contract
+    # commitment made *through* an email or calendar invite is still caught,
+    # because core.permanent_category_scan runs over the actual argument
+    # text (see llm/aldric_reply.py's tool_argument_categories) regardless
+    # of which tool carried it — a tool being generically "an email" doesn't
+    # make its contents exempt.
+    "create_email_draft": {"permanent_categories": frozenset(), "external_facing": False, "reversible": True},
+    "send_email": {"permanent_categories": frozenset(), "external_facing": True, "reversible": False},
+    "create_calendar_event": {"permanent_categories": frozenset(), "external_facing": True, "reversible": True},
+    "update_calendar_event": {"permanent_categories": frozenset(), "external_facing": True, "reversible": True},
+    "delete_calendar_event": {"permanent_categories": frozenset(), "external_facing": True, "reversible": False},
 }
+
+
+# PA Action Kernel Tier B: "PA signature discloses AI authorship
+# transparently... applied to all external output." This is a plain,
+# honest disclosure line, not a cryptographic signature despite the source
+# document's naming — see CLAUDE.md Section 5 on not dressing up a labeling
+# step as more than it is. Applied by the caller (aldric_chat.py) to the
+# externally-visible text argument of a Tier B action before it reaches
+# core.capability_broker.execute_action; capability_broker itself never
+# decides content, only executes what it's given.
+PA_SIGNATURE_DISCLOSURE = "\n\n— Drafted and sent by ALDRIC, an AI system, on the operator's behalf."
+
+
+def apply_pa_signature(text: str) -> str:
+    return text.rstrip() + PA_SIGNATURE_DISCLOSURE
 
 
 def build_action_request(tool_name: str, arguments: dict, surface_id: Optional[str] = None,

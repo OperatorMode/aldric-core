@@ -29,7 +29,7 @@ runs regardless of what the model says about itself.
 | `02_K1_Safety_Kernel.md` | `core/k1_safety.py` | Deterministic: precedence ordering, injection-pattern tripwire, no on/off switch anywhere in the codebase. Real safety/honesty behaviour is still the underlying model's own — this codebase cannot and does not claim to replace that. |
 | `03_APEX_Supervisor.md` | `core/apex_supervisor.py`, `llm/sidecar.py` | Deterministic: the response to a drift finding (force Validation scope, block output, log, notify) is fixed regardless of which detector fired. LLM step: the actual IDS-marker detection is a second model call (the Sidecar Auditor) — a `HeuristicIDSDetector` fallback exists for offline/test use and is explicitly weaker. |
 | `04_Operator_Kernel_KSP1.md` | `core/ksp1_operator_kernel.py`, `core/ksp_finality.py`, `llm/ksp_finality.py` | Deterministic: Loop Manager state machine, single-active-loop rule, session hard-stop conditions, the Adjudication Buffer, the Tier C two-stage confirmation gate, and — as of this rebuild's KSP Finality orchestration — the Keystone check (an unlocked/unconfirmed DSD refuses Phase 1 outright), the Convergence Gate (a real AND of three independent Validation Thread pass/fail judgments), the Integrity Gate's three-boolean AND, and the Unknown Variable Audit's forced-conditional banner. LLM steps, each a real separate model call: Structural Projection, the three Validation Threads, the Integrity Gate audit, and Compaction (`llm/ksp_finality.py`). Explicitly NOT implemented as literal math: the Mode/Layer vocabulary, Phase 2 Thread 3's "EGT manifold" ratio, and Phase 4's `D_KL` formula — the source document's own invented vocabulary for reasoning posture; the Convergence Gate is instead implemented honestly as thread-agreement, not a synthetic divergence number. |
-| `05_PA_Action_Kernel.md` | `core/pa_action_kernel.py`, `core/permanent_category_scan.py`, `llm/surface_matcher.py` | Deterministic: Tier A/B/C classification for named tools (ALDRIC Mode), critically the Permanent Tier C Exceptions check (runs first, cannot be reached by any mutation path from the API), and — as of this rebuild — the Section 4.2 "First Executable Crossing" gate (`Surface.execution_rights_confirmed`, `classify_tier` won't return Tier A/B without it, only `learning_governance.confirm_execution_rights` can set it). `permanent_category_scan.py` extends the same category set to free text (used by `chat.py`, since a chat reply has no tool name to look up). LLM step: genuine semantic surface matching now real — `llm/surface_matcher.py`'s `match_surface` offers only Executable-state surfaces as candidates and can only ever point at one by id, never invent or modify one; `NullSurfaceMatcher` remains as Governance Stack Mode's honest, on-purpose fallback (that kernel is inert there per the source document itself). Still not real: PA Action Kernel Component 5, contextual drift on a matched surface's own environment — a separate, still-unbuilt piece from matching itself. |
+| `05_PA_Action_Kernel.md` | `core/pa_action_kernel.py`, `core/permanent_category_scan.py`, `llm/surface_matcher.py`, `core/capability_broker.py` | Deterministic: Tier A/B/C classification for named tools (ALDRIC Mode), critically the Permanent Tier C Exceptions check (runs first, cannot be reached by any mutation path from the API), and — as of this rebuild — the Section 4.2 "First Executable Crossing" gate (`Surface.execution_rights_confirmed`, `classify_tier` won't return Tier A/B without it, only `learning_governance.confirm_execution_rights` can set it). `permanent_category_scan.py` extends the same category set to free text (used by `chat.py`, since a chat reply has no tool name to look up). As of this rebuild, a cleared Tier A/B tool call in ALDRIC Mode actually runs: `core/capability_broker.py` is the Capability Broker (Component 9-in-practice — see "Giving ALDRIC real hands" below), and `aldric_chat.py`'s `_execute_cleared_tool_call` is the only caller, gated on a tier `classify_tier()` already decided, never re-deciding it. LLM step: genuine semantic surface matching now real — `llm/surface_matcher.py`'s `match_surface` offers only Executable-state surfaces as candidates and can only ever point at one by id, never invent or modify one; `NullSurfaceMatcher` remains as Governance Stack Mode's honest, on-purpose fallback (that kernel is inert there per the source document itself). Still not real: PA Action Kernel Component 5, contextual drift on a matched surface's own environment — a separate, still-unbuilt piece from matching itself; and Governance Stack Mode's own Tier C tool calls still don't execute after adjudication clears (see gap list item 9 below). |
 | `06_Learning_Governance.md` | `core/learning_governance.py`, `core/surface_signal.py` | Deterministic: signal-type intake rejection of non-operational-truth signal, the Correction Absolute (`apply_correction` has no confidence-gated bypass), the Structural Floor as unreachable Python constants, mirror-drift indicators 1 and 2 (Section 4.2, real time-series comparison of stored timestamps, never a judgment about *why*), and — as of this rebuild — Confirmation Signal actually growing a Surface's confidence (`apply_confirmation`/`promote_surface_state`), gated on a deterministic classification of the operator's own utterance (`classify_confirmation`) and never ALDRIC's own read of a turn (Section 6.3); `core/surface_signal.py` wires `aldric_chat.py`'s memory scopes to real Surfaces with no semantic matching needed (the scope tag *is* the identity — see that module's docstring); correction/pattern observations and mirror-drift flags now actually reach `pa_action_kernel.generate_daily_digest()` (Section 6.2) instead of being dicts nothing called. Partial: indicators 3 and 4 ("outputs matching approval markers", "divergence from objective outcomes") still need an outcome-tracking data model this skeleton doesn't define yet — not faked here. |
 | `07_Operator_Profiles.md` | `core/operator_profiles.py` | Intentionally NOT a governance layer, per the source document itself — calibration templates only. |
 | `08_Governance_Chain.md` | `core/governance_chain.py`, `main.py`, `core/aldric_mode.py`, `aldric_chat.py` | Deterministic: load-order verification (order-sensitive, cascading failure), and the ALDRIC-Mode-vs-Governance-Stack-Mode initialization-state rule (observation mode vs. DSD Discovery firing immediately) — as of this rebuild's ALDRIC Mode entrypoint, that rule is real rather than descriptive: `core/aldric_mode.py`'s `requires_escalation()` is the one deterministic gate deciding whether a casual turn must escalate into a locked DSD, built from the same self-report-plus-scan discipline `llm/governed_reply.py` already uses, shared via `core/pa_action_kernel.py`'s `effective_tool_tier()` so the two modes' tool-call escalation logic cannot drift apart. LLM step: `llm/aldric_reply.py` runs the actual casual conversational turn. |
@@ -41,7 +41,7 @@ Run it:
 
 ```bash
 pip install -r requirements.txt
-pytest                    # 156 tests, all deterministic, no network calls
+pytest                    # 173 tests, all deterministic, no network calls
 uvicorn main:app --reload # http://127.0.0.1:8000/docs for interactive API
 
 export ANTHROPIC_API_KEY=sk-ant-...   # or Aldric-API, matching the Windows machine's existing var
@@ -224,6 +224,58 @@ matched surface's own environment shifting since it reached Executable;
 `drift_level=None` is passed at the call site today, honestly, not faked),
 and calibrating `DEFAULT_PROMOTION_THRESHOLDS` against real usage.
 
+## Giving ALDRIC real hands (the Capability Broker)
+
+Everything above this point in ALDRIC Mode was classification-and-audit
+metadata: `proposed_tool_call` got decided a tier, logged, described — never
+actually run. `core/capability_broker.py` is where that stops being true,
+for two real connectors: Gmail (send an email, create a draft) and Google
+Calendar (create, update, delete an event). These were picked because the
+operator already has a Google account for them — no custom backend, no
+phone, no OAuth server of ALDRIC's own to build first.
+
+One-time setup, done once by the operator (this needs a real Google login,
+so it can't be automated from inside a session):
+
+1. Create a project at console.cloud.google.com, enable the Gmail API and
+   the Google Calendar API for it.
+2. Configure the OAuth consent screen as "External," add your own Google
+   account under "Test users."
+3. Create an OAuth client ID of type "Desktop app," download its JSON, and
+   save it as `client_secret.json` in this repo's root (already in
+   `.gitignore` — never commit it).
+4. Run `pip install -r requirements.txt` to pick up the three new Google
+   client libraries.
+
+The first time `core.capability_broker.get_credentials()` actually needs to
+run (i.e. the first time a Tier A/B tool call reaches execution), it opens a
+one-time browser consent window and then caches the result in `token.json`
+(also gitignored) — every call after that is silent.
+
+What's wired end to end today, only in ALDRIC Mode (`aldric_chat.py`):
+`create_email_draft` (Tier A — silent, logged to digest), `send_email`,
+`create_calendar_event`, `update_calendar_event`, `delete_calendar_event`
+(all Tier B — executed, then reported in the digest with
+`core.pa_action_kernel.apply_pa_signature`'s plain AI-authorship disclosure
+line appended to whatever externally-visible text the action carries, per
+PA Action Kernel Tier B: "PA signature discloses AI authorship
+transparently"). `aldric_chat._execute_cleared_tool_call` never re-decides a
+tier — it can only be reached at all for a proposed tool call whose
+effective tier already cleared as A or B, because
+`core.aldric_mode.requires_escalation` raises out of the casual loop before
+this point for anything Tier C or permanent-category (see that function's
+own docstring). A broker failure (a rejected API call, expired credentials)
+is caught, logged to the digest as `status: "failed"`, and reported to the
+operator in-session — it does not crash the loop and it is never silently
+retried.
+
+What this does not do yet: Google Drive, or any tool beyond these five;
+Governance Stack Mode's own Tier C tool calls, once adjudicated and
+authorized in `chat.py`, still don't call the broker (see gap list item 9);
+and there's no per-operator choice yet about *which* Google account or
+whether to disable real execution entirely — today, a working
+`client_secret.json` means every cleared Tier A/B call really runs.
+
 ## Using the browser UI (`webapp.py`)
 
 `webapp.py` is `chat.py`'s exact governed sequence over a WebSocket instead of
@@ -393,15 +445,24 @@ This is a governance *kernel*, not a finished ALDRIC. To go further:
    parallel by accident. Still open: calibrating
    `DEFAULT_PROMOTION_THRESHOLDS`/`DEFAULT_PATTERN_CLUSTER_SIZE` against real
    usage instead of the starting defaults picked here.
-9. **Capability execution ("the Capability Broker").** Nothing in this
-   codebase, in either mode, ever actually executes a proposed tool call —
-   `proposed_tool_call` has always been classification-and-audit metadata
-   only. Items 1 and 8 together now mean a proposed action CAN be correctly
-   classified Tier A/B when it's genuinely earned that; nothing currently
-   acts on that classification. Building an actual executor — and, just as
-   important, deciding what Tier A "ALDRIC executes silently" concretely
-   means for a tool that has real side effects — is deliberately separate,
-   still-unbuilt work, not attempted here.
+9. ~~Capability execution ("the Capability Broker").~~ **Half-done.**
+   `core/capability_broker.py` is a real executor for two connectors: Gmail
+   (send/draft) and Google Calendar (create/update/delete event) — see
+   "Giving ALDRIC real hands" above for the full picture, including what
+   Tier A "executes silently" and Tier B "executes then notifies, with an
+   AI-authorship disclosure line" concretely mean for a tool with a real
+   side effect. Wired into ALDRIC Mode only (`aldric_chat.py`); a cleared
+   Tier A/B proposed tool call there now genuinely runs, is logged to the
+   digest, and a failure is caught and reported rather than crashing the
+   session. Still open: Governance Stack Mode's own adjudicated-and-
+   authorized Tier C tool calls (`chat.py`) still don't call the broker once
+   `authorize_emission()`/`confirm_content()` clears — `AdjudicationRecord`
+   already carries `action_hash` precisely so that wiring can bind execution
+   to the exact adjudicated action rather than re-deriving it, but the call
+   itself isn't made yet; no Google Drive connector; no per-operator choice
+   yet about which account is live or whether real execution is disabled
+   entirely; and no connector beyond Google's two APIs — a genuinely
+   general "any tool" broker is further out than this.
 
 ## A note on honesty in this build
 

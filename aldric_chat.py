@@ -63,7 +63,8 @@ from __future__ import annotations
 import chat  # reuse Governance Stack Mode's DSD discovery + governed session loop rather than duplicating them
 import core.long_term_memory as long_term_memory
 import core.surface_signal as surface_signal
-from llm.aldric_reply import run_casual_turn
+from core import capability_broker, pa_action_kernel
+from llm.aldric_reply import CasualTurnResult, run_casual_turn
 from models.schemas import (
     PERMANENT_TIER_C_CATEGORIES,
     ConfidenceState,
@@ -72,6 +73,25 @@ from models.schemas import (
     classify_confirmation,
 )
 from storage import db
+
+# Which argument of each real tool carries text a recipient/attendee would
+# actually see — the only thing the Tier B PA signature (see
+# core.pa_action_kernel.apply_pa_signature) ever gets applied to.
+# create_email_draft is deliberately absent: it's Tier A (nothing external
+# happens until a human sends it), so no disclosure is due yet.
+_EXTERNAL_TEXT_ARGUMENT = {
+    "send_email": "body",
+    "create_calendar_event": "description",
+    "update_calendar_event": "description",
+}
+
+
+def _with_pa_signature(tool_name: str, arguments: dict) -> dict:
+    field = _EXTERNAL_TEXT_ARGUMENT.get(tool_name)
+    if field and arguments.get(field):
+        arguments = dict(arguments)
+        arguments[field] = pa_action_kernel.apply_pa_signature(arguments[field])
+    return arguments
 
 
 class _Escalate(Exception):
@@ -145,6 +165,55 @@ def _present_first_executable_crossing(surface) -> None:
         print(f'[ALDRIC] Execution rights granted for "{surface.surface_id}".')
     else:
         print(f'[ALDRIC] Understood — holding off on "{surface.surface_id}" for now.')
+
+
+def _execute_cleared_tool_call(result: CasualTurnResult) -> None:
+    """The only place in ALDRIC Mode where a proposed tool call actually
+    happens (core.capability_broker, README gap-list item 9). Safe to call
+    unconditionally at the end of every turn because of what already ran
+    before this function is ever reached: `run_casual_session` always checks
+    `result.requires_escalation` first, and core.aldric_mode.requires_escalation
+    already raises _Escalate — before control gets here — for any proposed
+    tool call whose effective tier is C, or that touches a permanent
+    category at all. So a `proposed_tool_call` surviving to this point is
+    guaranteed Tier A or Tier B; this function's only job is to run it and
+    log what happened, never to re-decide whether it's allowed to. The
+    `tier not in (A, B)` branch below is defensive-only — it should be
+    unreachable given the above — and fails closed (skips execution, logs
+    why) rather than executing on an assumption."""
+    if not result.proposed_tool_call:
+        return
+
+    tool_name = result.proposed_tool_call["tool_name"]
+    arguments = result.proposed_tool_call.get("arguments") or {}
+    tier = result.signal.tool_effective_tier
+
+    if tier not in (Tier.A, Tier.B):
+        pa_action_kernel.log_digest_entry("executed_action", {
+            "tool": tool_name, "status": "skipped",
+            "reason": f"unexpected tier ({tier}) reached the execution point untouched by escalation",
+        })
+        return
+
+    if tier == Tier.B:
+        arguments = _with_pa_signature(tool_name, arguments)
+
+    try:
+        outcome = capability_broker.execute_action(tool_name, arguments)
+    except capability_broker.CapabilityBrokerError as exc:
+        pa_action_kernel.log_digest_entry("executed_action", {
+            "tool": tool_name, "tier": tier.value, "status": "failed", "error": str(exc),
+        })
+        print(f"\n[ALDRIC] That action ({tool_name}) failed to actually run: {exc}")
+        return
+
+    pa_action_kernel.log_digest_entry("executed_action", {
+        "tool": tool_name, "tier": tier.value, "status": "success", "result": outcome,
+    })
+    if tier == Tier.B:
+        # Tier B, PA Action Kernel: "execute then notify" — Tier A stays
+        # silent (logged to digest only) on purpose.
+        print(f"\n[ALDRIC] Done — {tool_name} executed (Tier B: execute then notify).")
 
 
 def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None:
@@ -250,6 +319,8 @@ def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None
             pending_scope = scope
         elif result.related_scope:
             pending_scope = result.related_scope
+
+        _execute_cleared_tool_call(result)
 
         display_text = result.output_text or result.clarifying_question or "(no reply)"
         print(f"\nALDRIC: {display_text}")

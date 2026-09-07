@@ -82,7 +82,18 @@ really mean it" step. Operator instruction is applied immediately and
 completely, every time, and the conflict record is written after, not as a
 gate before.
 
-## 8. Tests are the spec
+## 8. The Capability Broker never decides a tier
+
+`core/capability_broker.py` is the only module in this codebase allowed to
+call a real external API (Gmail, Google Calendar). Its functions must never
+grow their own tier/permission logic, a `dry_run` flag that quietly skips
+the classify_tier() check, or any argument inspection that decides whether
+an action is "safe enough" to run. A caller (`aldric_chat.py` today) decides
+whether an action may run, by calling `core.pa_action_kernel.classify_tier()`
+first; the broker's only job is to run what it's told, and to raise
+`CapabilityBrokerError` — never swallow an exception — when it can't.
+
+## 9. Tests are the spec
 
 `tests/` exists to prove the above claims, not just to exercise code paths.
 When you change a `core/` module, the relevant test in `tests/` should be the

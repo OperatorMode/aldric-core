@@ -4,3 +4,10 @@ storage/aldric.db
 storage/event_log.jsonl
 .pytest_cache/
 *.egg-info/
+
+# Real Google credentials — never committed. See README, "Giving ALDRIC
+# real hands." client_secret.json is the OAuth client downloaded from
+# Google Cloud Console; token.json is the cached token capability_broker
+# writes after the operator's first one-time consent.
+client_secret.json
+token.json
