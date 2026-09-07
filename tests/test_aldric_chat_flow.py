@@ -184,11 +184,14 @@ def test_clarification_answer_creates_a_real_surface_and_next_turn_confirms_it(m
     assert surface_signal.record_confirmation("client:acme").confirmation_count == 2
 
 
-def test_a_second_correction_for_the_same_scope_is_recorded_as_a_real_correction(monkeypatch, capsys):
+def test_a_second_clarification_for_the_same_scope_goes_through_the_reflective_cascade(monkeypatch, capsys):
     """Answering a clarifying question a second time for a scope that
-    already has an established standing preference must go through
-    apply_correction (a real conflict record), not be treated as a second
-    fresh instruction."""
+    already has real memory behind it (a Surface with confirmation/
+    correction history, or a standing preference) must not be treated as a
+    second fresh instruction — core.confidence_cascade intercepts it, and
+    an explicit 'no, ask every time' answer is recorded as a real
+    correction (a real conflict record on the Surface), not a plain
+    decline. See core/confidence_cascade.py's module docstring, point 1."""
     db.init_db()
     first_result = CasualTurnResult(
         output_text="",
@@ -196,13 +199,15 @@ def test_a_second_correction_for_the_same_scope_is_recorded_as_a_real_correction
         needs_clarification=True,
         clarifying_question="What tone for this client?",
         memory_scope="client:acme",
+        blocking=True,
     )
     second_result = CasualTurnResult(
         output_text="",
         signal=EscalationSignal(self_reported_scope="exploration"),
         needs_clarification=True,
-        clarifying_question="What tone for this client?",
+        clarifying_question="We've used a formal tone for Acme before — keep that as the default?",
         memory_scope="client:acme",
+        blocking=True,
     )
     follow_up_1 = _casual_result("Formal draft ready.")
     follow_up_2 = _casual_result("Casual draft ready.")
@@ -214,19 +219,22 @@ def test_a_second_correction_for_the_same_scope_is_recorded_as_a_real_correction
             "write an email to Acme",
             "Formal tone",
             "write another email to Acme",  # not confirmation vocabulary -> falls through normally
-            "Actually, warmer and casual",
+            "no, ask every time",
             "exit",
         ),
     )
 
     aldric_chat.main()
+    out = capsys.readouterr().out
+    assert "that's a correction, not just a decline" in out
 
     from storage import db as storage_db
     records = storage_db.list_conflict_records("client:acme")
     assert len(records) == 1
-    assert records[0]["operator_instruction"] == "Actually, warmer and casual"
+    assert records[0]["operator_instruction"] == "no, ask every time"
     stored = storage_db.get_surface("client:acme")
-    assert stored["description"] == "Actually, warmer and casual"
+    assert stored["correction_count"] == 1
+    assert stored["description"] == "no, ask every time"
 
 
 def test_surface_reaching_executable_presents_first_crossing_and_grants_rights_on_confirm(monkeypatch, capsys):

@@ -45,7 +45,22 @@ PERMANENT_TIER_C_CATEGORIES. That filter matters here specifically because
 `related_scope` is what lets aldric_chat.py treat the operator's very next
 "yes, that's right" as real confirmation signal on a real Surface — an
 invented or mistaken scope name should fail closed into "nothing to
-confirm", not silently create one."""
+confirm", not silently create one.
+
+Also carries `blocking` (core/confidence_cascade.py wiring): only meaningful
+when `needs_clarification` is true, and only another quality signal, same
+trust level as everything above — it is the "urgent" input
+core.confidence_cascade.decide_cascade needs to choose between asking now
+and parking the question for a later, natural check-in. Whether a scope
+actually HAS memory behind it (which is what decides whether the operator
+gets a plain question or a reflective one) is not trusted from the model at
+all; aldric_chat.py checks that structurally against storage.db before
+calling decide_cascade, same "self-report decides tone, never the
+governance-relevant fact" split used throughout this module. To make a
+reflective question possible in the first place, known Surface history
+(confirmation/correction counts, current confidence state) for scopes with
+memory behind them is now included alongside standing preferences/facts in
+the prompt's context — see `_format_known_memory` below."""
 from __future__ import annotations
 
 import json
@@ -94,8 +109,24 @@ Classify your own response honestly:
   reasonably make yourself. If true, set "clarifying_question" to the one
   question you'd ask, and "memory_scope" to a short tag for what this is
   about (e.g. "client", "team", "boss", or something more specific) so the
-  answer can be remembered under that scope and not asked again. If false,
-  leave "clarifying_question" and "memory_scope" as empty strings.
+  answer can be remembered under that scope and not asked again. If a known
+  Surface's history is listed above for that same scope, phrase
+  "clarifying_question" as a REFLECTIVE check-in citing what's actually on
+  record ("We've done a 10% repeat-client discount before — same here, and
+  should that be the default going forward?"), not a blind ask — you're
+  checking whether existing history applies, not starting from zero. If
+  false, leave "clarifying_question" and "memory_scope" as empty strings.
+- "blocking": true only if you genuinely cannot give ANY useful answer
+  right now without this — nothing to say, not even a partial or caveated
+  one. In that case leave "output" empty, exactly as described below.
+  false if you could still act on your best judgment or the cited history
+  right now, and this is really about confirming/refining the default for
+  NEXT time, not a hard blocker on THIS reply — in that case, give your
+  actual best-effort answer in "output" as normal (do not leave it empty
+  just because "needs_clarification" is also true), and treat
+  "clarifying_question" as a check-in to raise later, not something this
+  reply is waiting on. Only meaningful when "needs_clarification" is true;
+  leave false otherwise.
 - "related_scope": if — and only if — your answer actually drew on one of
   the known preferences/facts listed above, name that exact scope tag here
   (e.g. "client:acme"), so the operator confirming your answer next turn can
@@ -104,27 +135,49 @@ Classify your own response honestly:
   needs_clarification is true (nothing settled yet to confirm).
 
 Respond with ONLY this JSON:
-{{"output": "<your actual reply to the operator, or empty string if
-needs_clarification is true — nothing final to say yet>",
+{{"output": "<your actual reply to the operator, or empty string ONLY if
+needs_clarification is true AND blocking is true — otherwise your real
+best-effort reply even when needs_clarification is also true>",
 "scope": "exploration|validation|finality", "touched_categories": [...],
 "proposed_tool_call": {{"tool_name": "...", "arguments": {{...}}}} or null,
 "needs_clarification": true|false, "clarifying_question": "...",
-"memory_scope": "...", "related_scope": "..."}}"""
+"memory_scope": "...", "related_scope": "...", "blocking": true|false}}"""
 
 
-def _format_known_memory(preferences, facts) -> str:
+def _format_known_memory(preferences, facts, surfaces: list[Surface] | None = None) -> str:
     """Plain-text formatting, no ranking or embedding search — deliberately
     simple, matching this project's own stance (README/CLAUDE.md) that real
     semantic recall is a later concern, not something to fake here. If this
     list grows large enough that dumping all of it stops being useful, that
-    is the signal real retrieval is needed, not a reason to fake it now."""
-    if not preferences and not facts:
+    is the signal real retrieval is needed, not a reason to fake it now.
+
+    `surfaces` (core.confidence_cascade wiring) is optional and, when given,
+    only ever surfaces that actually carry history (at least one
+    confirmation or correction on record) — an OBSERVING surface with
+    nothing on it yet has nothing worth citing back to the operator, and
+    listing it would just invite a hallucinated-sounding "we've done this
+    before" about something that never actually happened. This is what lets
+    "needs_clarification" above turn into a reflective question instead of
+    a blind one when real history exists."""
+    surfaces = surfaces or []
+    surfaces_with_history = [s for s in surfaces if s.confirmation_count > 0 or s.correction_count > 0]
+    if not preferences and not facts and not surfaces_with_history:
         return ""
     lines = ["Known long-term memory (already established — use it, don't ask about it again):"]
     for p in preferences:
         lines.append(f'  - Standing preference [{p.scope}]: {p.content}')
     for f in facts:
         lines.append(f'  - Fact [{f.scope}]: {f.content}')
+    if surfaces_with_history:
+        lines.append("")
+        lines.append("Known behavioral history (confidence built from real confirmations/corrections — "
+                      "cite this specifically if you use it, don't just gesture at 'past experience'):")
+        for s in surfaces_with_history:
+            lines.append(
+                f'  - Surface [{s.surface_id}] ({s.state.value}, '
+                f'{s.confirmation_count} confirmation(s), {s.correction_count} correction(s)): '
+                f'{s.description or "(no recorded description yet)"}'
+            )
     return "\n".join(lines) + "\n\n"
 
 
@@ -137,6 +190,12 @@ class CasualTurnResult:
     clarifying_question: str = ""
     memory_scope: str = ""
     related_scope: str = ""
+    # Defaults True on purpose — the safe failure direction (same instinct
+    # as an unknown tool defaulting to Tier C): if nothing said this could
+    # wait, assume it can't, and ask now rather than silently deferring.
+    # "Not urgent" has to be an explicit, deliberate signal, never the
+    # fallback when the field is simply missing.
+    blocking: bool = True
 
     @property
     def requires_escalation(self) -> bool:
@@ -149,8 +208,13 @@ def run_casual_turn(conversation: list[dict[str, str]], user_message: str) -> Ca
 
     preferences = long_term_memory.list_preferences()
     facts = long_term_memory.list_facts()
-    known_memory = _format_known_memory(preferences, facts)
-    known_scope_names = frozenset(p.scope for p in preferences) | frozenset(f.scope for f in facts)
+    surfaces = [Surface(**raw) for raw in db.list_surfaces()]
+    known_memory = _format_known_memory(preferences, facts, surfaces)
+    known_scope_names = (
+        frozenset(p.scope for p in preferences)
+        | frozenset(f.scope for f in facts)
+        | frozenset(s.surface_id for s in surfaces)
+    )
     system_prompt = _SYSTEM_PROMPT_TEMPLATE.format(known_memory=known_memory)
 
     # See llm/dsd_interview.py's run_interview_step for why this budget is
@@ -187,7 +251,7 @@ def run_casual_turn(conversation: list[dict[str, str]], user_message: str) -> Ca
         # unaffected by Governance Stack Mode (llm/governed_reply.py), where
         # the PA Action Kernel stays inert per the source document and
         # surface=None remains hardcoded there on purpose.
-        known_surfaces = [Surface(**raw) for raw in db.list_surfaces()]
+        known_surfaces = surfaces
         matched_surface = match_surface(
             context={
                 "tool_name": proposed_tool_call["tool_name"],
@@ -235,4 +299,7 @@ def run_casual_turn(conversation: list[dict[str, str]], user_message: str) -> Ca
         clarifying_question=parsed.get("clarifying_question") or "",
         memory_scope=parsed.get("memory_scope") or "",
         related_scope=related_scope,
+        # Same safe-default reasoning as the dataclass field above: missing
+        # from the model's JSON means "ask now", not "safe to park".
+        blocking=bool(parsed.get("blocking", True)),
     )

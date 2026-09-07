@@ -63,12 +63,15 @@ from __future__ import annotations
 import chat  # reuse Governance Stack Mode's DSD discovery + governed session loop rather than duplicating them
 import core.long_term_memory as long_term_memory
 import core.surface_signal as surface_signal
-from core import capability_broker, idempotency_ledger, pa_action_kernel
+from core import capability_broker, confidence_cascade, idempotency_ledger, pa_action_kernel
+from core.confidence_cascade import ReflectiveResponse
+from core.ksp1_operator_kernel import LoopManager
 from llm.aldric_reply import CasualTurnResult, run_casual_turn
 from models.schemas import (
     PERMANENT_TIER_C_CATEGORIES,
     ConfidenceState,
     ConfirmationResult,
+    Surface,
     Tier,
     classify_confirmation,
 )
@@ -127,6 +130,26 @@ def _announce_and_escalate(conversation: list[dict[str, str]], result) -> None:
     print("[ALDRIC] Switching to Governance Stack Mode to establish exactly what we're deciding first.\n")
     conversation.append({"role": "assistant", "content": result.output_text})
     raise _Escalate(conversation)
+
+
+def _announce_reflective_outcome(bucket: ReflectiveResponse, surface, scope: str) -> None:
+    """Plain-language readout of what a reflective-question answer actually
+    did to the self-model — never silent, same "transitions are always
+    visible" principle applied elsewhere in this file (escalation, First
+    Executable Crossing). One line per core.confidence_cascade.
+    ReflectiveResponse bucket; pure function, no I/O, directly testable."""
+    if bucket == ReflectiveResponse.GENERALIZE:
+        print(f'[ALDRIC] Got it — treating that as the default for "{scope}" going forward '
+              f'({surface.confirmation_count} confirmation(s) on record now).')
+    elif bucket == ReflectiveResponse.SCOPE_NARROW:
+        print(f'[ALDRIC] Got it — noted specifically for "{surface.surface_id}"; '
+              f'the general default for "{scope}" is unchanged.')
+    elif bucket == ReflectiveResponse.ALWAYS_ASK:
+        print(f'[ALDRIC] Understood — that\'s a correction, not just a decline. '
+              f"I'll keep asking about \"{scope}\" every time.")
+    else:
+        print("[ALDRIC] Noted, but that didn't clearly land as a yes, a scoped yes, or an "
+              "always-ask — I may bring this up again next time it comes up.")
 
 
 class _SessionEnded(Exception):
@@ -253,6 +276,11 @@ def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None
     # counts (Learning Governance Section 2.2's "operator uses ALDRIC's
     # output ... " is about that output, not something several turns back).
     pending_scope = ""
+    # core.confidence_cascade's non-urgent path: session-scoped, same as
+    # pending_scope above — a low-stakes reflective question gets parked
+    # here (core.ksp1_operator_kernel.LoopManager, already-built park/resume
+    # machinery) instead of interrupting the current turn.
+    loop_manager = LoopManager()
 
     print("=" * 70)
     print("ALDRIC — ALDRIC Mode (casual)")
@@ -304,37 +332,97 @@ def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None
             _announce_and_escalate(conversation, result)
 
         if result.needs_clarification:
-            question = result.clarifying_question or "Could you clarify that for me?"
-            print(f"\nALDRIC: {question}")
-            conversation.append({"role": "assistant", "content": question})
-
-            try:
-                answer = input("You: ")
-            except (EOFError, KeyboardInterrupt):
-                print("\nSession ended.")
-                return
-
             scope = result.memory_scope or "general"
-            had_prior = long_term_memory.get_preference(scope) is not None
-            long_term_memory.set_preference(scope, answer)
-            surface_signal.record_instruction_or_correction(scope, answer, had_prior_preference=had_prior)
-            print(f'[ALDRIC] Remembered that for next time (under "{scope}") — won\'t need to ask again.')
-            conversation.append({"role": "user", "content": answer})
+            existing_surface_raw = db.get_surface(scope)
+            existing_surface = Surface(**existing_surface_raw) if existing_surface_raw else None
+            # Structural, not self-reported — whether memory actually exists
+            # for this scope is a checkable fact, never trusted from the
+            # model's own say-so (core.confidence_cascade module docstring;
+            # same discipline as tier/category classification elsewhere).
+            has_relevant_memory = bool(
+                existing_surface_raw is not None
+                or long_term_memory.get_preference(scope) is not None
+                or long_term_memory.list_facts(scope)
+            )
+            decision = confidence_cascade.decide_cascade(
+                surface=existing_surface, has_relevant_memory=has_relevant_memory, urgent=result.blocking,
+            )
 
-            try:
-                result = run_casual_turn(conversation, answer)
-            except Exception as exc:
-                print(f"\n(ALDRIC Mode turn failed: {exc})")
-                continue
+            if not decision.ask_now:
+                # Not urgent — per llm/aldric_reply.py's "blocking" contract,
+                # result.output_text is already the model's real best-effort
+                # reply for *this* turn; only the follow-up check-in is
+                # deferred, never the answer itself.
+                confidence_cascade.park_for_later(
+                    loop_manager, loop_name=f"cascade:{scope}",
+                    question=result.clarifying_question or f'Should "{scope}" work the same way going forward?',
+                )
+                print(f'[ALDRIC] (Also parked a check-in on "{scope}" for a natural point later, '
+                      f"rather than interrupting now.)")
+                # Deliberately no pending_scope set here: nothing was asked
+                # this turn, so the operator's next message is an ordinary
+                # turn, not an answer to anything.
+            else:
+                question = result.clarifying_question or "Could you clarify that for me?"
+                print(f"\nALDRIC: {question}")
+                conversation.append({"role": "assistant", "content": question})
 
-            if result.requires_escalation:
-                _announce_and_escalate(conversation, result)
-            # A second needs_clarification here isn't chased further — shown
-            # as-is below rather than looping again, so one user turn can't
-            # turn into an unbounded back-and-forth. The scope now has a real
-            # Surface behind it either way, so it's eligible for confirmation
-            # on the operator's next turn.
-            pending_scope = scope
+                try:
+                    answer = input("You: ")
+                except (EOFError, KeyboardInterrupt):
+                    print("\nSession ended.")
+                    return
+
+                if has_relevant_memory:
+                    # Reflective, not blind: the operator is confirming or
+                    # correcting existing history, so this is real
+                    # Confirmation/Correction Signal on the Surface — never
+                    # both this AND record_instruction_or_correction for the
+                    # same answer (core.confidence_cascade module docstring,
+                    # point 1).
+                    bucket, surface = confidence_cascade.apply_reflective_response(
+                        scope, answer, operator_instruction_if_correction=answer, domain=scope,
+                    )
+                    if bucket == ReflectiveResponse.AMBIGUOUS:
+                        # One neutral re-prompt, same discipline as an
+                        # ambiguous Tier C ratification utterance — never
+                        # guessed at, never chased indefinitely.
+                        print('\n[ALDRIC] Just to be clear: should that be the default going '
+                              "forward, just for this one, or would you rather I ask every time?")
+                        try:
+                            answer = input("You: ")
+                        except (EOFError, KeyboardInterrupt):
+                            print("\nSession ended.")
+                            return
+                        bucket, surface = confidence_cascade.apply_reflective_response(
+                            scope, answer, operator_instruction_if_correction=answer, domain=scope,
+                        )
+                    _announce_reflective_outcome(bucket, surface, scope)
+                else:
+                    # Genuinely new information — unchanged from before the
+                    # cascade existed: remember it and record real
+                    # Instruction Signal.
+                    had_prior = long_term_memory.get_preference(scope) is not None
+                    long_term_memory.set_preference(scope, answer)
+                    surface_signal.record_instruction_or_correction(scope, answer, had_prior_preference=had_prior)
+                    print(f'[ALDRIC] Remembered that for next time (under "{scope}") — won\'t need to ask again.')
+
+                conversation.append({"role": "user", "content": answer})
+
+                try:
+                    result = run_casual_turn(conversation, answer)
+                except Exception as exc:
+                    print(f"\n(ALDRIC Mode turn failed: {exc})")
+                    continue
+
+                if result.requires_escalation:
+                    _announce_and_escalate(conversation, result)
+                # A second needs_clarification here isn't chased further —
+                # shown as-is below rather than looping again, so one user
+                # turn can't turn into an unbounded back-and-forth. The
+                # scope now has a real Surface behind it either way, so it's
+                # eligible for confirmation on the operator's next turn.
+                pending_scope = scope
         elif result.related_scope:
             pending_scope = result.related_scope
 
