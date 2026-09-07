@@ -53,8 +53,16 @@ class NullSurfaceMatcher:
     full relationship/project context, which requires an LLM call informed
     by the actual self-model. This stub always returns 'no match', which is
     the SAFE default per Section 2.4 ('No match' -> Tier C, hold and
-    notify). Wire a real matcher behind this Protocol before relying on
-    Tier A/B autonomous execution for anything that matters."""
+    notify).
+
+    A real matcher now exists — `llm.surface_matcher.match_surface`,
+    wired into `llm/aldric_reply.py`'s proposed-tool-call path — so this
+    stub is kept only as the explicit, still-honest fallback for Governance
+    Stack Mode (`llm/governed_reply.py`), where the PA Action Kernel is
+    inert by the source document's own design (Position in Stack: 'In
+    session-based operation, the PA Action Kernel is inactive') and
+    `surface=None` is hardcoded there on purpose, not because no matcher
+    exists."""
 
     def match(self, context: dict, candidate_surfaces: list[Surface]) -> Optional[Surface]:
         return None
@@ -138,6 +146,20 @@ def classify_tier(
 
     if surface.state != ConfidenceState.EXECUTABLE:
         reasons.append(f"Surface state is {surface.state.value}, not Executable")
+        return TierDecision(tier=Tier.C, reasons=reasons)
+
+    # Section 4.2, "First Executable Crossing": the surface reaching
+    # Executable state is the kernel's own confidence assessment (Section
+    # 1.5) — a distinct thing from the operator's live, explicit sign-off
+    # that execution may actually run against it, which this section
+    # requires separately ("the one point in the continuous cycle where
+    # live confirmation is required"). A surface can sit at
+    # state=Executable indefinitely without ever clearing this.
+    if not surface.execution_rights_confirmed:
+        reasons.append(
+            "Surface reached Executable state but the operator has not yet granted execution "
+            "rights (Section 4.2, 'First Executable Crossing')"
+        )
         return TierDecision(tier=Tier.C, reasons=reasons)
 
     # Drift detected on a matched surface still forces Tier C (2.4, "Drift

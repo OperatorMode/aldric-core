@@ -72,7 +72,12 @@ def test_scanned_pricing_commitment_escalates_even_if_self_report_says_explorati
     assert result.requires_escalation is True
 
 
-def test_proposed_tool_call_always_escalates_today_via_no_surface_match(monkeypatch):
+def test_proposed_tool_call_with_no_surfaces_on_record_escalates_via_no_match(monkeypatch):
+    """The real surface matcher (llm/surface_matcher.py) is wired in now, but
+    with nothing in storage to match against it still, correctly, never
+    finds a match — and does so without a second model call at all (see
+    tests/test_surface_matcher.py for that guarantee's own direct coverage).
+    """
     canned = {
         "output": "I'll log that internally.",
         "scope": "exploration",
@@ -81,8 +86,61 @@ def test_proposed_tool_call_always_escalates_today_via_no_surface_match(monkeypa
     }
     monkeypatch.setattr(aldric_reply_module, "complete", _mock_complete(canned))
     result = run_casual_turn(conversation=[], user_message="log that")
-    assert result.signal.tool_identity_tier == Tier.C  # no real surface matcher yet
+    assert result.signal.tool_identity_tier == Tier.C  # no surfaces on record -> no match
     assert result.requires_escalation is True
+
+
+def test_proposed_tool_call_matched_to_a_real_executable_surface_can_reach_a_lower_tier(monkeypatch):
+    """Proves the matcher is actually consulted and its result actually
+    reaches classify_tier() — not just that the no-match path still works."""
+    import core.surface_signal as surface_signal
+    surface_signal.record_instruction_or_correction(
+        "client:acme", "Log internal notes about Acme freely.", had_prior_preference=False,
+    )
+    # One correction on record before confirming keeps this out of Mirror
+    # Drift Indicator 1's territory (Section 4.2: confidence climbing with
+    # *zero* corrections ever) — this test is about the matcher wiring, not
+    # a second, accidental proof of the mirror-drift detector.
+    surface_signal.record_instruction_or_correction(
+        "client:acme", "Log internal notes about Acme freely, but skip vendor names.", had_prior_preference=True,
+    )
+    for _ in range(5):
+        surface_signal.record_confirmation("client:acme")
+
+    from core.learning_governance import confirm_execution_rights
+    from storage import db as storage_db
+    from models.schemas import Surface as SurfaceModel
+    stored = storage_db.get_surface("client:acme")
+    assert stored["mirror_drift_flagged"] is False  # sanity check on the setup above
+    confirm_execution_rights(SurfaceModel(**stored))
+
+    canned = {
+        "output": "I'll log that internally.",
+        "scope": "exploration",
+        "touched_categories": [],
+        "proposed_tool_call": {"tool_name": "log_internal_note", "arguments": {"text": "met with Acme"}},
+    }
+    monkeypatch.setattr(aldric_reply_module, "complete", _mock_complete(canned))
+    monkeypatch.setattr(aldric_reply_module, "match_surface", lambda context, candidate_surfaces: next(
+        (s for s in candidate_surfaces if s.surface_id == "client:acme"), None
+    ))
+
+    result = run_casual_turn(conversation=[], user_message="log that meeting with Acme")
+    assert result.signal.tool_identity_tier == Tier.A
+    assert result.requires_escalation is False
+
+
+def test_surface_matcher_is_not_consulted_when_no_tool_call_is_proposed(monkeypatch):
+    """Cheap but worth proving directly: ordinary conversation never pays
+    for (or risks) a surface-matching call it doesn't need."""
+    def _explode(context, candidate_surfaces):
+        raise AssertionError("match_surface should not be called with no proposed_tool_call")
+    monkeypatch.setattr(aldric_reply_module, "match_surface", _explode)
+
+    canned = {"output": "Just a plain reply.", "scope": "exploration", "touched_categories": [], "proposed_tool_call": None}
+    monkeypatch.setattr(aldric_reply_module, "complete", _mock_complete(canned))
+    result = run_casual_turn(conversation=[], user_message="hello")
+    assert result.output_text == "Just a plain reply."
 
 
 def test_invented_category_string_does_not_leak_into_self_reported_categories(monkeypatch):

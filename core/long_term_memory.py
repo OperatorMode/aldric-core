@@ -43,11 +43,12 @@ tracks (the same "client:acme"/"team"/"boss" tags used for
 memory_scope/related_scope) doubles as a Learning Governance Surface's
 identity, with no semantic surface matching required — the scope is already
 an explicit tag, not something to be inferred. That's a different, easier
-problem than core/pa_action_kernel.py's NullSurfaceMatcher (matching a
-brand-new, *untagged* situation against many candidate surfaces), which is
-still an open stub — see core/surface_signal.py's module docstring for the
-full distinction, and the README gap list for what that harder problem still
-blocks.
+problem than the one core/pa_action_kernel.py's NullSurfaceMatcher used to
+stub out (matching a brand-new, *untagged* situation against many candidate
+surfaces) — that one is real now too, in llm/surface_matcher.py, and it
+matches against exactly the Surfaces core/surface_signal.py builds up from
+this module's scopes. See core/surface_signal.py's module docstring for the
+full distinction between the two problems.
 
 This module is the deterministic storage-facing layer only — no LLM calls.
 llm/aldric_reply.py is what actually fetches from here before a casual turn

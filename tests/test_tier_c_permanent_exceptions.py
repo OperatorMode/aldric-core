@@ -18,10 +18,19 @@ from models.schemas import ConfidenceState, DriftLevel, Surface, Tier
 
 
 def _executable_surface() -> Surface:
+    """A surface that has completed the FULL lifecycle this file's tests
+    care about: high confidence AND explicit operator sign-off
+    (execution_rights_confirmed — PA Action Kernel Section 4.2, 'First
+    Executable Crossing'). Without the latter, classify_tier() now holds at
+    Tier C regardless of state/confirmation_count (see
+    tests/test_execution_rights_gate.py for that gate's own dedicated
+    coverage) — set here so this file keeps testing what it says it tests:
+    the Permanent Tier C Exceptions, not the execution-rights gate."""
     return Surface(
         description="Routine pricing surface, high confidence",
         state=ConfidenceState.EXECUTABLE,
         confirmation_count=50,
+        execution_rights_confirmed=True,
     )
 
 

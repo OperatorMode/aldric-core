@@ -11,11 +11,11 @@ That statement is true for one kind of Surface use and not the other, and
 the distinction matters enough to spell out:
 
   * PA Action Kernel's Surface Matching (Section 2.2, "contextual fit") is
-    the hard, still-open problem: given a brand-new situation with no label
-    attached, decide semantically which of many existing surfaces (if any)
-    it's an instance of. `core.pa_action_kernel.NullSurfaceMatcher` stands in
-    for that and stays exactly as it is — this module does not touch it, and
-    README gap-list item 1 (the real surface matcher) is still open work.
+    the hard problem: given a brand-new situation with no label attached,
+    decide semantically which of many existing surfaces (if any) it's an
+    instance of. That has since been built for real — see
+    `llm/surface_matcher.py` — but it needs real Surfaces with real history
+    to match against in the first place. This module is what produces them.
   * What this module does is a different, much simpler problem: ALDRIC Mode
     already tags a scope explicitly, by name, at the moment a standing
     preference is set or a clarifying question is answered ("client:acme",
@@ -27,12 +27,13 @@ the distinction matters enough to spell out:
     correction history against, with no semantic judgment required at all.
 
 So: this closes the "surfaces accumulate real confidence" half of README
-gap-list items 5 and 7 for scope-tagged conversation, without needing item 1.
-It does not, and cannot, close item 1 itself — a proposed tool call in
-`llm/aldric_reply.py` still resolves through `classify_tier(..., surface=None,
-...)`, deliberately, because deciding whether an UNTAGGED action belongs to
-one of these surfaces is exactly the harder problem this module sidesteps
-rather than solves.
+gap-list items 5 and 7 for scope-tagged conversation. It was built before
+`llm/surface_matcher.py` and doesn't depend on it — a scope-tagged Surface
+here is exactly as real with or without that matcher existing — but the two
+were designed to fit together: a proposed tool call's context in
+`llm/aldric_reply.py` is untagged (nobody said "this is about client:acme"
+directly), which is precisely the matching problem `llm/surface_matcher.py`
+solves, over exactly the Surfaces this module maintains.
 
 No LLM calls live here — same "just data operations, gated by core/" shape
 as `core/long_term_memory.py`. The one call this module accepts as
@@ -131,3 +132,16 @@ def record_confirmation(scope: str, thresholds: dict | None = None,
         return None
     surface = Surface(**existing)
     return learning_governance.apply_confirmation(surface, thresholds=thresholds, db_path=db_path)
+
+
+def grant_execution_rights(scope: str, db_path: str = db.DEFAULT_DB_PATH) -> Surface | None:
+    """Thin pass-through to `learning_governance.confirm_execution_rights`,
+    keyed by scope the same way every other function here is — so callers
+    like aldric_chat.py stay at the scope-name level and never need to hold
+    onto a Surface object between turns. Returns None if no surface exists
+    for this scope (nothing to grant rights to)."""
+    existing = db.get_surface(scope, db_path)
+    if existing is None:
+        return None
+    surface = Surface(**existing)
+    return learning_governance.confirm_execution_rights(surface, db_path=db_path)

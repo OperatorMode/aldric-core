@@ -273,6 +273,37 @@ def apply_confirmation(surface: Surface, thresholds: dict | None = None,
     return surface
 
 
+def confirm_execution_rights(surface: Surface, db_path: str = db.DEFAULT_DB_PATH) -> Surface:
+    """PA Action Kernel Section 4.2, First Executable Crossing.
+
+    The one point in the continuous cycle where the document requires live
+    operator confirmation before any autonomous execution can ever run
+    against a surface — deliberately separate from, and later than, the
+    surface's `state` alone reaching Executable (that's `promote_surface_state`
+    above, a confidence assessment; this is operator sign-off on top of it).
+    `core.pa_action_kernel.classify_tier` will not return Tier A/B for a
+    surface until this has been called.
+
+    Callers must present the actual surface model to the operator first
+    (`aldric_chat.py` does this the moment a scope-tagged surface reaches
+    Executable) and only call this after a real, deterministically-classified
+    confirmation (`models.schemas.classify_confirmation`) — never on
+    ALDRIC's own initiative. PA Action Kernel Section 1.5 states the
+    parallel rule plainly: 'ALDRIC may not elevate a surface unilaterally.'
+    There is deliberately no corresponding function that revokes this from
+    inside the module on a timer or a heuristic — only explicit operator
+    action (a future suspension/drift response) should ever take it back."""
+    surface.execution_rights_confirmed = True
+    surface.updated_at = dt.datetime.now(dt.timezone.utc).isoformat()
+    db.save_surface(surface, db_path)
+    write_event("EXECUTION_RIGHTS_CONFIRMED", {"surface_id": surface.surface_id})
+    log_digest_entry("confidence_change", {
+        "surface_id": surface.surface_id,
+        "execution_rights_confirmed": True,
+    }, db_path=db_path)
+    return surface
+
+
 def _check_and_log_mirror_drift(surface: Surface, db_path: str = db.DEFAULT_DB_PATH) -> None:
     """Shared by `apply_correction` and `apply_confirmation` — both are
     moments a confidence-relevant counter on this surface just changed, so

@@ -29,7 +29,7 @@ runs regardless of what the model says about itself.
 | `02_K1_Safety_Kernel.md` | `core/k1_safety.py` | Deterministic: precedence ordering, injection-pattern tripwire, no on/off switch anywhere in the codebase. Real safety/honesty behaviour is still the underlying model's own — this codebase cannot and does not claim to replace that. |
 | `03_APEX_Supervisor.md` | `core/apex_supervisor.py`, `llm/sidecar.py` | Deterministic: the response to a drift finding (force Validation scope, block output, log, notify) is fixed regardless of which detector fired. LLM step: the actual IDS-marker detection is a second model call (the Sidecar Auditor) — a `HeuristicIDSDetector` fallback exists for offline/test use and is explicitly weaker. |
 | `04_Operator_Kernel_KSP1.md` | `core/ksp1_operator_kernel.py`, `core/ksp_finality.py`, `llm/ksp_finality.py` | Deterministic: Loop Manager state machine, single-active-loop rule, session hard-stop conditions, the Adjudication Buffer, the Tier C two-stage confirmation gate, and — as of this rebuild's KSP Finality orchestration — the Keystone check (an unlocked/unconfirmed DSD refuses Phase 1 outright), the Convergence Gate (a real AND of three independent Validation Thread pass/fail judgments), the Integrity Gate's three-boolean AND, and the Unknown Variable Audit's forced-conditional banner. LLM steps, each a real separate model call: Structural Projection, the three Validation Threads, the Integrity Gate audit, and Compaction (`llm/ksp_finality.py`). Explicitly NOT implemented as literal math: the Mode/Layer vocabulary, Phase 2 Thread 3's "EGT manifold" ratio, and Phase 4's `D_KL` formula — the source document's own invented vocabulary for reasoning posture; the Convergence Gate is instead implemented honestly as thread-agreement, not a synthetic divergence number. |
-| `05_PA_Action_Kernel.md` | `core/pa_action_kernel.py`, `core/permanent_category_scan.py` | Deterministic: Tier A/B/C classification for named tools (ALDRIC Mode), and critically, the Permanent Tier C Exceptions check, which runs first and cannot be reached by any mutation path from the API. `permanent_category_scan.py` extends the same category set to free text (used by `chat.py`, since a chat reply has no tool name to look up). LLM step (stubbed): genuine semantic surface matching — `NullSurfaceMatcher` always returns "no match," which is the *safe* default (Tier C), not a real matcher. This kernel is inert in Governance Stack Mode (`chat.py`'s mode) per the source document itself. |
+| `05_PA_Action_Kernel.md` | `core/pa_action_kernel.py`, `core/permanent_category_scan.py`, `llm/surface_matcher.py` | Deterministic: Tier A/B/C classification for named tools (ALDRIC Mode), critically the Permanent Tier C Exceptions check (runs first, cannot be reached by any mutation path from the API), and — as of this rebuild — the Section 4.2 "First Executable Crossing" gate (`Surface.execution_rights_confirmed`, `classify_tier` won't return Tier A/B without it, only `learning_governance.confirm_execution_rights` can set it). `permanent_category_scan.py` extends the same category set to free text (used by `chat.py`, since a chat reply has no tool name to look up). LLM step: genuine semantic surface matching now real — `llm/surface_matcher.py`'s `match_surface` offers only Executable-state surfaces as candidates and can only ever point at one by id, never invent or modify one; `NullSurfaceMatcher` remains as Governance Stack Mode's honest, on-purpose fallback (that kernel is inert there per the source document itself). Still not real: PA Action Kernel Component 5, contextual drift on a matched surface's own environment — a separate, still-unbuilt piece from matching itself. |
 | `06_Learning_Governance.md` | `core/learning_governance.py`, `core/surface_signal.py` | Deterministic: signal-type intake rejection of non-operational-truth signal, the Correction Absolute (`apply_correction` has no confidence-gated bypass), the Structural Floor as unreachable Python constants, mirror-drift indicators 1 and 2 (Section 4.2, real time-series comparison of stored timestamps, never a judgment about *why*), and — as of this rebuild — Confirmation Signal actually growing a Surface's confidence (`apply_confirmation`/`promote_surface_state`), gated on a deterministic classification of the operator's own utterance (`classify_confirmation`) and never ALDRIC's own read of a turn (Section 6.3); `core/surface_signal.py` wires `aldric_chat.py`'s memory scopes to real Surfaces with no semantic matching needed (the scope tag *is* the identity — see that module's docstring); correction/pattern observations and mirror-drift flags now actually reach `pa_action_kernel.generate_daily_digest()` (Section 6.2) instead of being dicts nothing called. Partial: indicators 3 and 4 ("outputs matching approval markers", "divergence from objective outcomes") still need an outcome-tracking data model this skeleton doesn't define yet — not faked here. |
 | `07_Operator_Profiles.md` | `core/operator_profiles.py` | Intentionally NOT a governance layer, per the source document itself — calibration templates only. |
 | `08_Governance_Chain.md` | `core/governance_chain.py`, `main.py`, `core/aldric_mode.py`, `aldric_chat.py` | Deterministic: load-order verification (order-sensitive, cascading failure), and the ALDRIC-Mode-vs-Governance-Stack-Mode initialization-state rule (observation mode vs. DSD Discovery firing immediately) — as of this rebuild's ALDRIC Mode entrypoint, that rule is real rather than descriptive: `core/aldric_mode.py`'s `requires_escalation()` is the one deterministic gate deciding whether a casual turn must escalate into a locked DSD, built from the same self-report-plus-scan discipline `llm/governed_reply.py` already uses, shared via `core/pa_action_kernel.py`'s `effective_tool_tier()` so the two modes' tool-call escalation logic cannot drift apart. LLM step: `llm/aldric_reply.py` runs the actual casual conversational turn. |
@@ -41,7 +41,7 @@ Run it:
 
 ```bash
 pip install -r requirements.txt
-pytest                    # 140 tests, all deterministic, no network calls
+pytest                    # 156 tests, all deterministic, no network calls
 uvicorn main:app --reload # http://127.0.0.1:8000/docs for interactive API
 
 export ANTHROPIC_API_KEY=sk-ant-...   # or Aldric-API, matching the Windows machine's existing var
@@ -130,11 +130,11 @@ that gap for ALDRIC Mode, and it does it without needing gap-list item 1
 exists to solve rather than solving it:
 
 - **PA Action Kernel's Surface Matching** (Section 2.2, "contextual fit") is
-  the hard, still-open problem — given a brand-new, *untagged* situation,
-  decide semantically which of many existing surfaces it's an instance of.
-  `NullSurfaceMatcher` still stands in for that, unchanged, and a proposed
-  tool call in `llm/aldric_reply.py` still resolves through
-  `classify_tier(..., surface=None, ...)`. Gap-list item 1 is still open.
+  the hard problem — given a brand-new, *untagged* situation (a proposed
+  tool call, not something the operator explicitly labeled), decide
+  semantically which of many existing surfaces it's an instance of. This
+  used to be `NullSurfaceMatcher`'s job to stub out; it's now real — see
+  "The real Surface Matcher" below. This section is about the other half.
 - **Scope-tagged conversation** never has that ambiguity — the scope is
   supplied explicitly, by name, at the moment a standing preference is set
   ("client:acme", "team", "boss" — the same `memory_scope`/`related_scope`
@@ -166,12 +166,63 @@ What's actually live now, end to end in `aldric_chat.py`:
   correctly-shaped dict nothing ever called — Section 6.2's self-model
   visibility was true in theory before this and is now true in practice.
 
-What this does *not* do: it doesn't make any tool call more autonomous.
-Tier A/B/C classification for a proposed action is completely unaffected —
-still `surface=None`, still Tier C by the "no match" default, on purpose.
-These Surfaces exist so that when the real surface matcher eventually is
-built, it has real confidence history to match against instead of an empty
-table — not to grant any autonomy today.
+These Surfaces are exactly what the real surface matcher (next section) now
+matches proposed tool calls against — this is the layer that produces the
+confidence history for that matcher to work with, not a self-contained
+feature.
+
+## The real Surface Matcher
+
+`core/pa_action_kernel.py`'s `NullSurfaceMatcher` was a deliberately honest
+stub: its own docstring said real matching "requires an LLM call informed by
+the actual self-model." `llm/surface_matcher.py` is that call, closing
+README gap-list item 1.
+
+What it actually does: when `llm/aldric_reply.py` sees a proposed tool call,
+it loads every Surface on record and asks the model — given the proposed
+action and the conversation that produced it — whether this situation
+genuinely sits within the boundary of one of them (Section 2.2's "contextual
+fit," not action-type or tool-name similarity). Two things keep this
+honestly gated rather than a name that just delegates trust to the model:
+
+- Only Executable-state surfaces are ever offered as candidates (Section
+  2.0: "Surface matching runs against Executable surfaces"), filtered
+  deterministically before the model sees anything.
+- The model can point at a real candidate by its id. It cannot invent one,
+  and nothing about the Surface actually used — its state, its confidence
+  counts, its description — ever comes from what the model claims; it's
+  always the object already on record in storage. A hallucinated or
+  mismatched id, non-JSON output, or a null answer all resolve to "no
+  match," exactly like an honest one would — this never fails open.
+
+There's a second gate on top, separate from matching itself: PA Action
+Kernel Section 4.2, "First Executable Crossing." A surface's `state`
+reaching Executable is the kernel's own confidence assessment (Section 1.5)
+— it is deliberately not the same thing as the operator's live, explicit
+sign-off that execution may actually run against it, which Section 4.2
+requires separately ("the one point in the continuous cycle where live
+confirmation is required"). `Surface.execution_rights_confirmed` is that
+second flag; `classify_tier()` now refuses Tier A/B for any surface until
+it's set, and the only way it gets set is
+`core.learning_governance.confirm_execution_rights`, called from
+`aldric_chat.py`'s `_present_first_executable_crossing` the moment a
+scope's surface first reaches Executable state — it prints exactly what
+ALDRIC has recorded (the description, the confirmation/correction counts)
+and asks for a real, deterministically-classified "confirmed" before
+granting anything. ALDRIC never grants this to itself, matching Section
+1.5's parallel rule for surfaces generally: "ALDRIC may not elevate a
+surface unilaterally."
+
+What this still does *not* do: execute anything. There is no Capability
+Broker in this codebase — a proposed tool call remains classification-and-
+audit metadata (`llm/aldric_reply.py`'s own docstring), never a capability.
+A correctly matched, rights-confirmed Executable surface can now make
+`classify_tier()` return Tier A/B instead of an automatic Tier C, but
+nothing downstream currently acts on that tier. What's still genuinely
+separate, unbuilt work: PA Action Kernel Component 5 (contextual drift — a
+matched surface's own environment shifting since it reached Executable;
+`drift_level=None` is passed at the call site today, honestly, not faked),
+and calibrating `DEFAULT_PROMOTION_THRESHOLDS` against real usage.
 
 ## Using the browser UI (`webapp.py`)
 
@@ -256,14 +307,18 @@ gate can't be collapsed into one utterance, including the documented
 
 This is a governance *kernel*, not a finished ALDRIC. To go further:
 
-1. **A real surface matcher.** `NullSurfaceMatcher` is a safe stub, not a
-   feature. Building genuine contextual-fit matching (Section 2.2) means
-   giving an LLM call the operator's actual relationship/project context and
-   parsing its output into a `Surface` reference, still gated by
-   `classify_tier()`. Relevant to ALDRIC Mode only — `chat.py` doesn't need
-   this. This is specifically about matching an *untagged* new situation
-   against many candidate surfaces — see item 8 below for the different,
-   already-solved problem of a surface whose scope is already known by name.
+1. ~~A real surface matcher.~~ **Done.** `llm/surface_matcher.py` is a real
+   LLM call over the operator's actual conversation/tool-call context,
+   matched against whatever Executable surfaces are on record, gated by
+   `classify_tier()` exactly as planned — see "The real Surface Matcher"
+   above for the full picture, including the separate PA Action Kernel
+   Section 4.2 "First Executable Crossing" gate this uncovered and closed
+   alongside it (`Surface.execution_rights_confirmed`). Relevant to ALDRIC
+   Mode only — `chat.py` doesn't need this; `NullSurfaceMatcher` stays as
+   its correct, on-purpose fallback there. Still open: PA Action Kernel
+   Component 5 (contextual drift on a matched surface's own environment) is
+   a separate, still-unbuilt piece from matching itself, and this still
+   doesn't make anything execute — see below.
 2. ~~The Sidecar Auditor is built but not the default.~~ **Done.**
    `chat.py` now builds its IDS detector through `_build_ids_detector()`,
    which returns `SidecarIDSDetector` (a real second model call against the
@@ -306,14 +361,15 @@ This is a governance *kernel*, not a finished ALDRIC. To go further:
    casual conversation with no DSD upfront, escalating into Governance Stack
    Mode only when a turn actually needs it — is built and tested
    (`core/aldric_mode.py`, `llm/aldric_reply.py`, `aldric_chat.py`; see
-   "Using ALDRIC Mode" above). Scope-tagged surfaces now do accumulate real
-   confidence over time (item 8 below) — what's still genuinely Phase 4+
+   "Using ALDRIC Mode" above). Scope-tagged surfaces now accumulate real
+   confidence over time (item 8 below) and a proposed tool call is now
+   matched against them for real (item 1) — what's still genuinely Phase 4+
    territory and not attempted here: fully autonomous operation with
-   triggers arriving without the operator present, the *untagged* surface
-   matcher (item 1), and the Daily Digest as a standing artifact rather than
-   an on-demand command. Also not yet done: wiring this same
-   casual/escalation flow into `webapp.py`'s browser UI — right now it's
-   terminal-only.
+   triggers arriving without the operator present (there is still no
+   Capability Broker — nothing executes a matched, rights-confirmed action),
+   and the Daily Digest as a standing artifact rather than an on-demand
+   command. Also not yet done: wiring this same casual/escalation flow into
+   `webapp.py`'s browser UI — right now it's terminal-only.
 6. **Persistence beyond SQLite.** `storage/db.py` is plain relational SQLite.
    The project's own tech-stack reference lists `sqlite-vec` as a Phase 6+
    concern (semantic memory recall) — deliberately not pulled forward here.
@@ -331,12 +387,21 @@ This is a governance *kernel*, not a finished ALDRIC. To go further:
    Section 6.3) on the operator's next matching "confirmed"/"yes", and
    correction/pattern/confidence-change/mirror-drift entries that now
    actually reach the Daily Digest instead of sitting as unread dicts. See
-   "Learning Governance in live conversation" above for the full picture,
-   including exactly why this didn't need item 1 first. What's still open:
-   item 1 itself (matching an *untagged* new situation, still needed before
-   any of this can make a proposed tool call more autonomous), and
-   calibrating `DEFAULT_PROMOTION_THRESHOLDS`/`DEFAULT_PATTERN_CLUSTER_SIZE`
-   against real usage instead of the starting defaults picked here.
+   "Learning Governance in live conversation" above for the full picture.
+   These are exactly the surfaces item 1's real matcher now matches proposed
+   tool calls against — the two pieces were built to fit together, not in
+   parallel by accident. Still open: calibrating
+   `DEFAULT_PROMOTION_THRESHOLDS`/`DEFAULT_PATTERN_CLUSTER_SIZE` against real
+   usage instead of the starting defaults picked here.
+9. **Capability execution ("the Capability Broker").** Nothing in this
+   codebase, in either mode, ever actually executes a proposed tool call —
+   `proposed_tool_call` has always been classification-and-audit metadata
+   only. Items 1 and 8 together now mean a proposed action CAN be correctly
+   classified Tier A/B when it's genuinely earned that; nothing currently
+   acts on that classification. Building an actual executor — and, just as
+   important, deciding what Tier A "ALDRIC executes silently" concretely
+   means for a tool that has real side effects — is deliberately separate,
+   still-unbuilt work, not attempted here.
 
 ## A note on honesty in this build
 

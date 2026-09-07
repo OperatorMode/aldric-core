@@ -17,6 +17,13 @@ GovernedTurnResult's requires_adjudication.
 Executing a proposed tool call is, as in Governance Stack Mode, a separate
 milestone this module does not touch — proposed_tool_call is
 classification-and-audit metadata carried on the result, never a capability.
+Classifying that proposed call now goes through the real surface matcher
+(llm/surface_matcher.py) instead of a hardcoded surface=None: whatever
+Surfaces core/surface_signal.py has built up from scope-tagged conversation
+are offered as candidates, and a genuine contextual-fit match (never a
+matcher-invented one — see that module for the gating) is what lets
+classify_tier() reach Tier A/B at all. Nothing this module does with that
+tier decision changes: it is still audit metadata, never an execution.
 
 Also wires in long-term memory (core/long_term_memory.py): every casual turn
 is given whatever standing preferences and facts are already on record
@@ -50,7 +57,9 @@ from core.aldric_mode import EscalationSignal, requires_escalation
 from core.pa_action_kernel import build_action_request, classify_tier
 from core.permanent_category_scan import scan_for_permanent_categories
 from llm.client import DEFAULT_MODEL, complete, strip_json_code_fence
-from models.schemas import PERMANENT_TIER_C_CATEGORIES, Tier
+from llm.surface_matcher import match_surface
+from models.schemas import PERMANENT_TIER_C_CATEGORIES, Surface, Tier
+from storage import db
 
 _SYSTEM_PROMPT_TEMPLATE = """You are ALDRIC, operating in ALDRIC Mode: ordinary, low-friction
 conversation. Answer the operator's message directly and helpfully — research,
@@ -168,12 +177,34 @@ def run_casual_turn(conversation: list[dict[str, str]], user_message: str) -> Ca
     if isinstance(proposed_tool_call, dict) and proposed_tool_call.get("tool_name"):
         has_proposed_tool_call = True
         arguments = proposed_tool_call.get("arguments") or {}
-        # surface=None: same fail-closed default Governance Stack Mode uses
-        # (NullSurfaceMatcher — no real surface tracking exists yet; PA
-        # Action Kernel Section 2.4, "no match" -> Tier C). Do not pass a
-        # real Surface here until real surface tracking exists.
         action = build_action_request(tool_name=proposed_tool_call["tool_name"], arguments=arguments)
-        decision = classify_tier(action, surface=None, drift_level=None, mirror_drift_flagged=False)
+
+        # The real surface matcher (llm/surface_matcher.py, README gap-list
+        # item 1) — a genuine semantic-fit judgment over whatever surfaces
+        # exist, gated the same way every other LLM judgment in this
+        # codebase is: the model can only ever point at a real, already-
+        # stored Surface by id, never invent or modify one. Note this is
+        # unaffected by Governance Stack Mode (llm/governed_reply.py), where
+        # the PA Action Kernel stays inert per the source document and
+        # surface=None remains hardcoded there on purpose.
+        known_surfaces = [Surface(**raw) for raw in db.list_surfaces()]
+        matched_surface = match_surface(
+            context={
+                "tool_name": proposed_tool_call["tool_name"],
+                "arguments": arguments,
+                "conversation_excerpt": full_user_message,
+            },
+            candidate_surfaces=known_surfaces,
+        )
+        # drift_level=None: PA Action Kernel Component 5 (contextual drift —
+        # a surface's own environment shifting since it reached Executable)
+        # is a separate, still-unbuilt piece from surface matching itself;
+        # not faked here. Mirror drift (Learning Governance's own detector)
+        # IS already tracked per-surface and is honored below.
+        decision = classify_tier(
+            action, surface=matched_surface, drift_level=None,
+            mirror_drift_flagged=matched_surface.mirror_drift_flagged if matched_surface else False,
+        )
         tool_identity_tier = decision.tier
         tool_argument_categories = scan_for_permanent_categories(json.dumps(arguments, default=str))
     else:

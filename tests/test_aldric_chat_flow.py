@@ -24,9 +24,9 @@ def _scripted_inputs(*answers):
     return _fake_input
 
 
-def _casual_result(text, scope="exploration", scanned_categories=frozenset()) -> CasualTurnResult:
+def _casual_result(text, scope="exploration", scanned_categories=frozenset(), related_scope="") -> CasualTurnResult:
     signal = EscalationSignal(self_reported_scope=scope, scanned_categories=scanned_categories)
-    return CasualTurnResult(output_text=text, signal=signal)
+    return CasualTurnResult(output_text=text, signal=signal, related_scope=related_scope)
 
 
 def test_casual_session_never_shows_dsd_interview_when_nothing_escalates(monkeypatch, capsys):
@@ -227,6 +227,82 @@ def test_a_second_correction_for_the_same_scope_is_recorded_as_a_real_correction
     assert records[0]["operator_instruction"] == "Actually, warmer and casual"
     stored = storage_db.get_surface("client:acme")
     assert stored["description"] == "Actually, warmer and casual"
+
+
+def test_surface_reaching_executable_presents_first_crossing_and_grants_rights_on_confirm(monkeypatch, capsys):
+    """End to end: a scope's Surface accumulating enough confirmations to
+    cross into Executable state triggers PA Action Kernel Section 4.2's
+    'First Executable Crossing' presentation, and a real 'confirmed' answer
+    to THAT prompt (not the earlier confirmations that built up to it) is
+    what actually grants execution rights."""
+    db.init_db()
+    first_result = CasualTurnResult(
+        output_text="", signal=EscalationSignal(self_reported_scope="exploration"),
+        needs_clarification=True, clarifying_question="What tone for Acme?", memory_scope="client:acme",
+    )
+    follow_ups = [
+        _casual_result(f"Draft {i}", related_scope="client:acme") for i in range(1, 6)
+    ]
+    results = iter([first_result, *follow_ups])
+    monkeypatch.setattr(aldric_chat, "run_casual_turn", lambda conversation, user_message: next(results))
+    monkeypatch.setattr(
+        "builtins.input",
+        _scripted_inputs(
+            "write an email to Acme", "Formal tone, no jokes",
+            "confirmed", "anything1",
+            "confirmed", "anything2",
+            "confirmed", "anything3",
+            "confirmed", "anything4",
+            "confirmed",             # 5th confirmation -> crosses into Executable
+            "confirmed",             # answer to the first-crossing prompt itself
+            "exit",
+        ),
+    )
+
+    aldric_chat.main()
+    out = capsys.readouterr().out
+    assert '"client:acme" has reached a stable, consistent pattern' in out
+    assert 'Execution rights granted for "client:acme"' in out
+
+    from storage import db as storage_db
+    stored = storage_db.get_surface("client:acme")
+    assert stored["state"] == "executable"
+    assert stored["execution_rights_confirmed"] is True
+
+
+def test_declining_the_first_crossing_prompt_does_not_grant_execution_rights(monkeypatch, capsys):
+    db.init_db()
+    first_result = CasualTurnResult(
+        output_text="", signal=EscalationSignal(self_reported_scope="exploration"),
+        needs_clarification=True, clarifying_question="What tone for Acme?", memory_scope="client:acme",
+    )
+    follow_ups = [
+        _casual_result(f"Draft {i}", related_scope="client:acme") for i in range(1, 6)
+    ]
+    results = iter([first_result, *follow_ups])
+    monkeypatch.setattr(aldric_chat, "run_casual_turn", lambda conversation, user_message: next(results))
+    monkeypatch.setattr(
+        "builtins.input",
+        _scripted_inputs(
+            "write an email to Acme", "Formal tone, no jokes",
+            "confirmed", "anything1",
+            "confirmed", "anything2",
+            "confirmed", "anything3",
+            "confirmed", "anything4",
+            "confirmed",              # 5th confirmation -> crosses into Executable
+            "not right now",          # declines the first-crossing prompt
+            "exit",
+        ),
+    )
+
+    aldric_chat.main()
+    out = capsys.readouterr().out
+    assert 'Understood — holding off on "client:acme"' in out
+
+    from storage import db as storage_db
+    stored = storage_db.get_surface("client:acme")
+    assert stored["state"] == "executable"
+    assert stored["execution_rights_confirmed"] is False
 
 
 def test_clarification_that_itself_escalates_hands_off_correctly(monkeypatch, capsys):

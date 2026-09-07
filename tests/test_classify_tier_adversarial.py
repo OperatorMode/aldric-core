@@ -25,10 +25,16 @@ from models.schemas import ConfidenceState, DriftLevel, Surface, Tier
 
 
 def _executable_surface() -> Surface:
+    """See tests/test_tier_c_permanent_exceptions.py's identical helper for
+    why execution_rights_confirmed=True is set explicitly here: this file's
+    tests are about tool-identity/argument classification, not PA Action
+    Kernel Section 4.2's separate execution-rights gate (covered on its own
+    in tests/test_execution_rights_gate.py)."""
     return Surface(
         description="Routine surface, high confidence",
         state=ConfidenceState.EXECUTABLE,
         confirmation_count=50,
+        execution_rights_confirmed=True,
     )
 
 

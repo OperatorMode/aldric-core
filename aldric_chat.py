@@ -40,8 +40,18 @@ confirmation vocabulary (models.schemas.classify_confirmation — the same
 deterministic check Governance Stack Mode uses for Tier C ratification, not
 ALDRIC's own read of how the turn went) and, if it matches, recorded as real
 Confirmation Signal. See core/surface_signal.py's module docstring for why
-this doesn't need the still-open real surface matcher (README gap-list item
-1) to do this honestly.
+this didn't need the real surface matcher (README gap-list item 1) to do
+this honestly.
+
+That matcher (llm/surface_matcher.py) now exists, which makes the moment a
+scope's Surface first reaches Executable state a real, live-governance
+moment rather than a number changing quietly in storage: PA Action Kernel
+Section 4.2 ("First Executable Crossing") requires the operator see the
+surface model and explicitly grant execution rights before anything can
+ever be classified above Tier C against it — see
+`_present_first_executable_crossing` below. This is deliberately separate
+from, and later than, the state transition itself (a confidence assessment,
+not operator sign-off), and ALDRIC never grants it to itself.
 
 Requires ANTHROPIC_API_KEY or Aldric-API in the environment. Run:
 
@@ -54,7 +64,13 @@ import chat  # reuse Governance Stack Mode's DSD discovery + governed session lo
 import core.long_term_memory as long_term_memory
 import core.surface_signal as surface_signal
 from llm.aldric_reply import run_casual_turn
-from models.schemas import PERMANENT_TIER_C_CATEGORIES, ConfirmationResult, Tier, classify_confirmation
+from models.schemas import (
+    PERMANENT_TIER_C_CATEGORIES,
+    ConfidenceState,
+    ConfirmationResult,
+    Tier,
+    classify_confirmation,
+)
 from storage import db
 
 
@@ -91,6 +107,44 @@ def _announce_and_escalate(conversation: list[dict[str, str]], result) -> None:
     print("[ALDRIC] Switching to Governance Stack Mode to establish exactly what we're deciding first.\n")
     conversation.append({"role": "assistant", "content": result.output_text})
     raise _Escalate(conversation)
+
+
+class _SessionEnded(Exception):
+    """Raised out of the first-executable-crossing prompt on EOF/interrupt,
+    so run_casual_session can end the same way every other input() site in
+    this file does, without duplicating that handling here."""
+
+
+def _present_first_executable_crossing(surface) -> None:
+    """PA Action Kernel Section 4.2, First Executable Crossing — 'the one
+    point in the continuous cycle where live confirmation is required'
+    before any autonomous execution can ever run against a surface. Called
+    the moment a scope's Surface reaches state=Executable (its state alone
+    getting there is just the kernel's own confidence assessment — Section
+    1.5 — never operator sign-off by itself). Presents exactly what ALDRIC
+    has actually recorded, nothing more, and only grants execution rights on
+    the same deterministic confirmation check used everywhere else in this
+    codebase (models.schemas.classify_confirmation) — never on ALDRIC's own
+    read of the moment. If the operator doesn't confirm, execution rights
+    are simply not granted yet; this is asked again the next time
+    confirmation activity touches this surface, rather than assuming a
+    non-answer means anything in particular."""
+    print(f'\n[ALDRIC] "{surface.surface_id}" has reached a stable, consistent pattern:')
+    print(f'  What I\'ve learned: {surface.description}')
+    print(f'  Built from {surface.confirmation_count} confirmation(s), '
+          f'{surface.correction_count} correction(s) applied along the way.')
+    print('  Before this can ever be treated as more than "hold for your confirmation," '
+          'I need your explicit sign-off on that understanding.')
+    try:
+        answer = input('Grant execution rights for this? ("confirmed" to grant, anything else to hold off): ')
+    except (EOFError, KeyboardInterrupt):
+        raise _SessionEnded()
+
+    if classify_confirmation(answer) == ConfirmationResult.CONFIRMED:
+        surface_signal.grant_execution_rights(surface.surface_id)
+        print(f'[ALDRIC] Execution rights granted for "{surface.surface_id}".')
+    else:
+        print(f'[ALDRIC] Understood — holding off on "{surface.surface_id}" for now.')
 
 
 def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None:
@@ -140,6 +194,13 @@ def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None
                         f'(now {confirmed_surface.state.value}, '
                         f'{confirmed_surface.confirmation_count} confirmation(s) on record).'
                     )
+                    if (confirmed_surface.state == ConfidenceState.EXECUTABLE
+                            and not confirmed_surface.execution_rights_confirmed):
+                        try:
+                            _present_first_executable_crossing(confirmed_surface)
+                        except _SessionEnded:
+                            print("\nSession ended.")
+                            return
                     continue
                 # Nothing on record for that scope to confirm — fall through
                 # and treat this message as an ordinary turn instead.

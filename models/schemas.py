@@ -203,6 +203,16 @@ class Surface(BaseModel):
     created_at: str = Field(default_factory=_now)
     updated_at: str = Field(default_factory=_now)
     mirror_drift_flagged: bool = False
+    # PA Action Kernel Section 4.2, "First Executable Crossing": reaching
+    # `state == EXECUTABLE` is the kernel's own assessment that accumulated
+    # signal is sufficient (Section 1.5) — it is NOT the same thing as the
+    # operator's live, explicit sign-off that execution may actually run
+    # against this surface, which Section 4.2 requires separately ("the one
+    # point in the continuous cycle where live confirmation is required").
+    # Defaults False and is never set anywhere except
+    # `core.learning_governance.confirm_execution_rights` — see that
+    # function for why ALDRIC cannot grant this to itself.
+    execution_rights_confirmed: bool = False
 
 
 class ConflictRecordEntry(BaseModel):
