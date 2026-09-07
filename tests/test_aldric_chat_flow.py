@@ -12,6 +12,7 @@ import chat
 from core.aldric_mode import EscalationSignal
 from core.apex_supervisor import HeuristicIDSDetector
 from llm.aldric_reply import CasualTurnResult
+from models.schemas import ConfidenceState, Surface
 from storage import db
 
 
@@ -352,3 +353,79 @@ def test_clarification_that_itself_escalates_hands_off_correctly(monkeypatch, ca
     assert "What should we charge for this package?" in out
     assert "This has stopped being casual" in out
     assert "Governance Stack Mode" in out
+
+
+def test_a_trusted_nonflagged_surface_resolves_from_memory_without_asking(monkeypatch, capsys):
+    """core.confidence_cascade.decide_cascade's `resolve=True` branch (an
+    Executable, non-mirror-drift-flagged surface with real memory behind
+    it) — proves aldric_chat.py actually reads `decision.resolve`, not just
+    `decision.ask_now`: found live by demos/live_session_demo.py, which
+    showed the old code taking the identical "park for later" branch for a
+    genuinely trusted surface as it does for one with no memory at all. No
+    question is asked here (no extra input() consumed — if the code
+    incorrectly asked one, the next input() call would return "exit" as the
+    answer instead and the turn would show up as failed rather than
+    resolved), nothing is treated as Confirmation Signal (confirmation_count
+    doesn't move — a memory-resolve must never grow confidence by itself,
+    core/confidence_cascade.py's module docstring point 1), and the
+    surface's own recorded description is what the operator actually sees
+    when the model itself left output_text empty (self-reported
+    blocking=True, not knowing the cascade would resolve this first)."""
+    db.init_db()
+    trusted_surface = Surface(
+        surface_id="client:acme", description="Formal tone, always used for Acme.",
+        state=ConfidenceState.EXECUTABLE, confirmation_count=5, correction_count=1,
+        mirror_drift_flagged=False,
+    )
+    db.save_surface(trusted_surface)
+
+    ask_result = CasualTurnResult(
+        output_text="",
+        signal=EscalationSignal(self_reported_scope="exploration"),
+        needs_clarification=True, blocking=True,
+        clarifying_question="Same formal tone for this Acme email too?",
+        memory_scope="client:acme",
+    )
+    monkeypatch.setattr(aldric_chat, "run_casual_turn", lambda conversation, user_message: ask_result)
+    monkeypatch.setattr("builtins.input", _scripted_inputs("draft another email to Acme", "exit"))
+
+    aldric_chat.main()
+    out = capsys.readouterr().out
+    assert "ALDRIC Mode turn failed" not in out
+    assert 'Resolved "client:acme" from memory' in out
+    assert "Formal tone, always used for Acme." in out
+    assert "Same formal tone for this Acme email too?" not in out  # never actually asked
+
+    stored = db.get_surface("client:acme")
+    assert stored["confirmation_count"] == 5  # unchanged — resolving never grows confidence
+    assert stored["correction_count"] == 1
+
+
+def test_resolved_answer_uses_the_models_own_output_when_it_gave_one(monkeypatch, capsys):
+    """blocking=False means the model already gave a real best-effort
+    answer even while also asking a (now-skipped) reflective question — the
+    resolve path must use that real answer, not silently overwrite it with
+    the surface-description fallback (that fallback is only for the
+    blocking=True/empty-output_text case, covered above)."""
+    db.init_db()
+    trusted_surface = Surface(
+        surface_id="client:acme", description="Formal tone, always used for Acme.",
+        state=ConfidenceState.EXECUTABLE, confirmation_count=5, correction_count=1,
+        mirror_drift_flagged=False,
+    )
+    db.save_surface(trusted_surface)
+
+    ask_result = CasualTurnResult(
+        output_text="Draft's ready, formal tone as usual.",
+        signal=EscalationSignal(self_reported_scope="exploration"),
+        needs_clarification=True, blocking=False,
+        clarifying_question="Same formal tone for this Acme email too?",
+        memory_scope="client:acme",
+    )
+    monkeypatch.setattr(aldric_chat, "run_casual_turn", lambda conversation, user_message: ask_result)
+    monkeypatch.setattr("builtins.input", _scripted_inputs("draft another email to Acme", "exit"))
+
+    aldric_chat.main()
+    out = capsys.readouterr().out
+    assert "Draft's ready, formal tone as usual." in out
+    assert 'Resolved "client:acme" from memory' in out

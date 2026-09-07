@@ -33,16 +33,24 @@ actual pending_scope / needs_clarification control flow so the operator
 inputs land exactly where they're meant to.
 
 This script is what first surfaced two real findings, kept as printed
-output at the end of a run rather than filed as a silent TODO: (1) a
-Surface that accumulates confirmations with zero corrections self-flags for
-mirror drift (Learning Governance Section 4.2, indicator 1) without
-`_present_first_executable_crossing` ever mentioning it to the operator,
-and (2) `aldric_chat.py`'s live wiring only ever branches on
-`CascadeDecision.ask_now` — `.resolve` and `.cite_memory` are computed by
-`core.confidence_cascade.decide_cascade` but never read anywhere in the
-live loop, so a genuinely trusted, non-flagged surface takes the exact same
-"park for later" branch as a surface with no memory behind it at all. See
-README's gap list for the current status of both.
+output at the end of a run rather than filed as a silent TODO:
+
+  1. A Surface that accumulates confirmations with zero corrections
+     self-flags for mirror drift (Learning Governance Section 4.2,
+     indicator 1) without `_present_first_executable_crossing` ever
+     mentioning it to the operator. Still open — see README's gap list.
+  2. `aldric_chat.py`'s live wiring only ever branched on
+     `CascadeDecision.ask_now` — `.resolve` and `.cite_memory` were
+     computed by `core.confidence_cascade.decide_cascade` but never read
+     anywhere in the live loop, so a genuinely trusted, non-flagged
+     surface took the exact same "park for later" branch as a surface
+     with no memory behind it at all. FIXED — `run_casual_session` now
+     branches on `decision.resolve` first and answers from the surface's
+     own recorded description (falling back to it only when the model
+     itself left `output_text` empty) instead of asking or parking at
+     all; see `tests/test_aldric_chat_flow.py`'s
+     `test_a_trusted_nonflagged_surface_resolves_from_memory_without_asking`
+     and the section near the end of this script that verifies it live.
 
 WARNING: resets the real dev DB (storage/aldric.db) and event log to a
 clean slate before running, the same way tests/conftest.py's reset_storage
@@ -70,7 +78,7 @@ import core.capability_broker as capability_broker
 from core.aldric_mode import EscalationSignal
 from core.pa_action_kernel import generate_daily_digest
 from llm.aldric_reply import CasualTurnResult
-from models.schemas import Surface, Tier
+from models.schemas import ConfidenceState, Surface, Tier
 
 
 def chapter(title: str) -> None:
@@ -311,7 +319,7 @@ print(f"  _present_first_executable_crossing() does not mention it at all — th
       f"execution")
 print(f"  rights above having seen confirmation/correction counts, but not this flag.")
 
-chapter("FINDING 2 — does aldric_chat.py actually use decide_cascade's 'resolve' signal?")
+chapter("FINDING 2 (FIXED) — does aldric_chat.py actually use decide_cascade's 'resolve' signal?")
 from core import confidence_cascade
 
 decision_flagged = confidence_cascade.decide_cascade(surface=acme_surface, has_relevant_memory=True, urgent=False)
@@ -322,24 +330,43 @@ print(f"    reasons={decision_flagged.reasons}")
 print(f"  (Mirror-drift correctly forces resolve=False here — design call #3 in the module docstring, "
       f"working as intended.)")
 
-clean_surface = Surface(surface_id="client:acme-clean-example", description="Formal tone, always used for Acme.",
-                         state=acme_surface.state, confirmation_count=5, correction_count=1,
+clean_surface = Surface(surface_id="demo:trusted_resolve_example",
+                         description="Formal tone, always used for Acme.",
+                         state=ConfidenceState.EXECUTABLE, confirmation_count=5, correction_count=1,
                          mirror_drift_flagged=False)
+db.save_surface(clean_surface)
 decision_clean = confidence_cascade.decide_cascade(surface=clean_surface, has_relevant_memory=True, urgent=False)
-print(f"\n  Using a hypothetical CLEAN Executable surface (same state, one correction on record so "
-      f"indicator 1 never trips, not mirror-drift-flagged):")
+print(f"\n  Using a CLEAN Executable surface (same state, one correction on record so indicator 1 "
+      f"never trips, not mirror-drift-flagged), saved for real under scope "
+      f"\"demo:trusted_resolve_example\":")
 print(f"    decide_cascade(..., urgent=False) -> resolve={decision_clean.resolve} "
       f"ask_now={decision_clean.ask_now} cite_memory={decision_clean.cite_memory}")
 print(f"    reasons={decision_clean.reasons}")
-print("  aldric_chat.py's needs_clarification block only ever branches on `decision.ask_now`")
-print("  (see the `if not decision.ask_now: park_for_later(...)` in run_casual_session) —")
-print("  `decision.resolve` and `decision.cite_memory` are never read there. So even when the cascade")
-print("  computes resolve=True (\"confident enough to just answer from memory, no question needed\"),")
-print("  for a genuinely clean, trusted surface, the live wiring takes the exact same branch as a")
-print("  real park — same park_for_later() call, same digest entry, same printed message — with no")
-print("  way for the operator to tell 'I'm confident, ask later just to double-check' apart from")
-print("  'I have no idea, ask later.' This is a real gap between the tested cascade core and its")
-print("  live wiring, not a hypothetical — decide_cascade computed resolve=True right here.")
+print("\n  This used to be where the bug was: aldric_chat.py's needs_clarification block only ever")
+print("  branched on `decision.ask_now`, never `decision.resolve` — a genuinely trusted surface took")
+print("  the exact same 'park for later' branch as one with no memory at all. Now fixed (see")
+print("  run_casual_session's new `if decision.resolve:` branch, ahead of the park/ask branches).")
+print("  Proving it live, one more turn through the real code, for this exact surface:\n")
+
+resolve_demo_result = CasualTurnResult(
+    output_text="",  # left empty, same as a model self-reporting blocking=True
+    signal=EscalationSignal(self_reported_scope="exploration"),
+    needs_clarification=True, blocking=True,
+    clarifying_question="Same formal default for this one too?",
+    memory_scope="demo:trusted_resolve_example",
+)
+resolve_demo_inputs = iter(["One more thing for this trusted scope.", "exit"])
+
+
+def _resolve_demo_input(prompt: str = "") -> str:
+    answer = next(resolve_demo_inputs)
+    print(f"{prompt}{answer}")
+    return answer
+
+
+aldric_chat.run_casual_turn = lambda conversation, user_message: resolve_demo_result
+builtins.input = _resolve_demo_input
+aldric_chat.main()
 
 chapter("BONUS — Idempotency Ledger dedup (calling the exact same action twice)")
 from core import idempotency_ledger

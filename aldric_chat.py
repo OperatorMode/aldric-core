@@ -348,7 +348,33 @@ def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None
                 surface=existing_surface, has_relevant_memory=has_relevant_memory, urgent=result.blocking,
             )
 
-            if not decision.ask_now:
+            if decision.resolve:
+                # High enough trust (Executable, not mirror-drift-flagged)
+                # plus real memory behind this scope — decide_cascade says
+                # act now from memory alone, no question needed at all.
+                # Deliberately distinct from the park branch below: there is
+                # nothing to check in on later, and this is NOT a
+                # Confirmation Signal — a memory-resolve must never grow
+                # confidence by itself (core/confidence_cascade.py module
+                # docstring, point 1; see also Learning Governance Section
+                # 6.3). If the model left output_text empty (it self-
+                # reported blocking=True without knowing the cascade would
+                # resolve this before ever asking), fall back to citing the
+                # surface's own recorded description rather than showing
+                # the operator nothing.
+                if not result.output_text:
+                    result.output_text = (
+                        f'Going with what\'s already on record for "{scope}": '
+                        f'{existing_surface.description}' if existing_surface.description
+                        else f'Going with the established default for "{scope}".'
+                    )
+                print(f'[ALDRIC] (Resolved "{scope}" from memory — '
+                      f'{existing_surface.confirmation_count} confirmation(s) on record, no need to ask.)')
+                # Deliberately no pending_scope set here, same reasoning as
+                # the park branch below: nothing was asked this turn, so
+                # there is nothing for the operator's next message to
+                # confirm.
+            elif not decision.ask_now:
                 # Not urgent — per llm/aldric_reply.py's "blocking" contract,
                 # result.output_text is already the model's real best-effort
                 # reply for *this* turn; only the follow-up check-in is

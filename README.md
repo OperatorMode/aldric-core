@@ -34,7 +34,7 @@ runs regardless of what the model says about itself.
 | `07_Operator_Profiles.md` | `core/operator_profiles.py` | Intentionally NOT a governance layer, per the source document itself — calibration templates only. |
 | `08_Governance_Chain.md` | `core/governance_chain.py`, `main.py`, `core/aldric_mode.py`, `aldric_chat.py` | Deterministic: load-order verification (order-sensitive, cascading failure), and the ALDRIC-Mode-vs-Governance-Stack-Mode initialization-state rule (observation mode vs. DSD Discovery firing immediately) — as of this rebuild's ALDRIC Mode entrypoint, that rule is real rather than descriptive: `core/aldric_mode.py`'s `requires_escalation()` is the one deterministic gate deciding whether a casual turn must escalate into a locked DSD, built from the same self-report-plus-scan discipline `llm/governed_reply.py` already uses, shared via `core/pa_action_kernel.py`'s `effective_tool_tier()` so the two modes' tool-call escalation logic cannot drift apart. LLM step: `llm/aldric_reply.py` runs the actual casual conversational turn. |
 | *(operator extension, not one of the eight documents)* | `models/schemas.py` (`StandingPreference`, `MemoryFact`), `core/long_term_memory.py`, `llm/aldric_reply.py` | Long-term memory across sessions — see "Long-term memory" below. Deterministic: all storage and retrieval (upsert-by-scope for preferences, append-only for facts). LLM step: deciding what's worth asking about instead of guessing (`needs_clarification`/`clarifying_question`/`memory_scope`) is self-reported and NOT governance-critical (`core/aldric_mode.py` never looks at it), unlike scope/touched_categories on the same turn. `related_scope` is the same self-reported, non-governance-critical shape, but additionally filtered against the real known-scope set before use — see "Learning Governance in live conversation" below. |
-| *(operator extension, not one of the eight documents)* | `core/confidence_cascade.py`, `aldric_chat.py`, `llm/aldric_reply.py` | Whether to ask a clarifying question at all, and what a real answer to one actually does to confidence — see "The Confidence Cascade" below. Deterministic: `decide_cascade()`'s resolve/ask-now/park decision, and `classify_reflective_response()`'s closed-vocabulary classification of the operator's answer. LLM step: `llm/aldric_reply.py`'s self-reported `blocking` field (defaults `True` on anything missing or malformed) is the only non-deterministic input to `decide_cascade()`, and is not itself governance-critical in the Section 1 sense — it only affects ask-now-vs-park timing, never whether confidence moves. |
+| *(operator extension, not one of the eight documents)* | `core/confidence_cascade.py`, `aldric_chat.py`, `llm/aldric_reply.py` | Whether to ask a clarifying question at all, and what a real answer to one actually does to confidence — see "The Confidence Cascade" below. Deterministic: `decide_cascade()`'s resolve/ask-now/park decision, and `classify_reflective_response()`'s closed-vocabulary classification of the operator's answer. LLM step: `llm/aldric_reply.py`'s self-reported `blocking` field (defaults `True` on anything missing or malformed) is the only non-deterministic input to `decide_cascade()`, and is not itself governance-critical in the Section 1 sense — it only affects resolve/ask-now/park timing, never whether confidence moves. |
 
 ## What's built and tested
 
@@ -215,7 +215,16 @@ fail-closed direction as an unclassified tool defaulting to Tier C.
   mirror-drift-flagged surface never resolves silently, no matter how high
   its confirmation count climbed — the operator's explicit call, since that
   count is exactly the number under suspicion (see the gap list's mirror-
-  drift item below).
+  drift item below). `aldric_chat.py`'s live loop branches on
+  `decision.resolve` first, ahead of the ask-now/park branches — a
+  genuinely trusted, non-flagged surface with real memory answers straight
+  from the surface's own recorded description (falling back to it only
+  when the model itself left `output_text` empty) rather than asking or
+  parking at all. `demos/live_session_demo.py` is what first caught this
+  live wiring only reading `decision.ask_now` and not `.resolve`; see that
+  file's own docstring, and
+  `tests/test_aldric_chat_flow.py`'s
+  `test_a_trusted_nonflagged_surface_resolves_from_memory_without_asking`.
 - **`classify_reflective_response()` / `apply_reflective_response()`**
   handle what happens when a scope with real memory does get asked a
   genuine reflective question ("we've used a formal tone for Acme before —
