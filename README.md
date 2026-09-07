@@ -34,6 +34,7 @@ runs regardless of what the model says about itself.
 | `07_Operator_Profiles.md` | `core/operator_profiles.py` | Intentionally NOT a governance layer, per the source document itself — calibration templates only. |
 | `08_Governance_Chain.md` | `core/governance_chain.py`, `main.py`, `core/aldric_mode.py`, `aldric_chat.py` | Deterministic: load-order verification (order-sensitive, cascading failure), and the ALDRIC-Mode-vs-Governance-Stack-Mode initialization-state rule (observation mode vs. DSD Discovery firing immediately) — as of this rebuild's ALDRIC Mode entrypoint, that rule is real rather than descriptive: `core/aldric_mode.py`'s `requires_escalation()` is the one deterministic gate deciding whether a casual turn must escalate into a locked DSD, built from the same self-report-plus-scan discipline `llm/governed_reply.py` already uses, shared via `core/pa_action_kernel.py`'s `effective_tool_tier()` so the two modes' tool-call escalation logic cannot drift apart. LLM step: `llm/aldric_reply.py` runs the actual casual conversational turn. |
 | *(operator extension, not one of the eight documents)* | `models/schemas.py` (`StandingPreference`, `MemoryFact`), `core/long_term_memory.py`, `llm/aldric_reply.py` | Long-term memory across sessions — see "Long-term memory" below. Deterministic: all storage and retrieval (upsert-by-scope for preferences, append-only for facts). LLM step: deciding what's worth asking about instead of guessing (`needs_clarification`/`clarifying_question`/`memory_scope`) is self-reported and NOT governance-critical (`core/aldric_mode.py` never looks at it), unlike scope/touched_categories on the same turn. `related_scope` is the same self-reported, non-governance-critical shape, but additionally filtered against the real known-scope set before use — see "Learning Governance in live conversation" below. |
+| *(operator extension, not one of the eight documents)* | `core/confidence_cascade.py`, `aldric_chat.py`, `llm/aldric_reply.py` | Whether to ask a clarifying question at all, and what a real answer to one actually does to confidence — see "The Confidence Cascade" below. Deterministic: `decide_cascade()`'s resolve/ask-now/park decision, and `classify_reflective_response()`'s closed-vocabulary classification of the operator's answer. LLM step: `llm/aldric_reply.py`'s self-reported `blocking` field (defaults `True` on anything missing or malformed) is the only non-deterministic input to `decide_cascade()`, and is not itself governance-critical in the Section 1 sense — it only affects ask-now-vs-park timing, never whether confidence moves. |
 
 ## What's built and tested
 
@@ -41,7 +42,7 @@ Run it:
 
 ```bash
 pip install -r requirements.txt
-pytest                    # 173 tests, all deterministic, no network calls
+pytest                    # 217 tests, all deterministic, no network calls
 uvicorn main:app --reload # http://127.0.0.1:8000/docs for interactive API
 
 export ANTHROPIC_API_KEY=sk-ant-...   # or Aldric-API, matching the Windows machine's existing var
@@ -103,7 +104,11 @@ can say so (`needs_clarification`) instead of guessing. `aldric_chat.py`
 asks the one question, saves the answer as a new standing preference under
 the scope the model proposed, tells the operator plainly that it did so, and
 then actually finishes the original request with the new information —
-asking once, not every time after.
+asking once, not every time after. That's still exactly what happens for a
+genuinely new scope with no memory behind it yet. A scope that already has
+real history — a Surface with confirmation or correction counts, or a
+standing preference already on file — goes through a different path now;
+see "The Confidence Cascade" below.
 
 A third, genuinely different memory concept lives alongside this one:
 Learning Governance's per-Surface confidence (`core/learning_governance.py`)
@@ -170,6 +175,70 @@ These Surfaces are exactly what the real surface matcher (next section) now
 matches proposed tool calls against — this is the layer that produces the
 confidence history for that matcher to work with, not a self-contained
 feature.
+
+## The Confidence Cascade (asking less, and learning more from the answers)
+
+The section above made `needs_clarification` real Instruction/Correction
+Signal, but it still treated every clarifying question the same way: ask
+synchronously, right now, every time, and log a repeat answer for the same
+scope as if it were brand-new instruction. `core/confidence_cascade.py`
+replaces "always ask" with an actual decision, and — the more important
+half — makes a second answer to a scope that already has real history
+behind it behave differently from a first one, instead of silently
+teaching the self-model nothing.
+
+It's wired into `aldric_chat.py` via a new field on `llm/aldric_reply.py`'s
+turn result, `blocking` — a self-reported (like `needs_clarification`
+itself, and equally not governance-critical) signal for whether this turn
+genuinely needs the answer to keep going, or could wait for a natural
+check-in later. It defaults to `True` on anything missing or malformed —
+"not urgent" has to be a deliberate signal, never the fallback, the same
+fail-closed direction as an unclassified tool defaulting to Tier C.
+
+- **`decide_cascade()`** runs before anything is asked. Given a scope's
+  Surface (if any) and whether there's relevant memory at all, it decides:
+  resolve silently (an Executable-state, non-mirror-drift-flagged surface
+  with real memory behind it — nothing to ask), ask now (urgent, or nothing
+  to go on at all), or park the question for a later natural point instead
+  of interrupting the current turn (`core.ksp1_operator_kernel.LoopManager
+  .park_loop`, reused rather than building a second parking mechanism). A
+  mirror-drift-flagged surface never resolves silently, no matter how high
+  its confirmation count climbed — the operator's explicit call, since that
+  count is exactly the number under suspicion (see the gap list's mirror-
+  drift item below).
+- **`classify_reflective_response()` / `apply_reflective_response()`**
+  handle what happens when a scope with real memory does get asked a
+  genuine reflective question ("we've used a formal tone for Acme before —
+  keep that as the default?"). The operator's answer is classified into one
+  of four closed buckets and dispatched to the real
+  `apply_confirmation`/`apply_correction` functions, never a fresh
+  `record_instruction_or_correction` call: **generalize** ("yes") grows
+  confidence on the general surface; **scope-narrow** ("yes, but only for
+  Acme") grows confidence on a distinct, separately-tracked
+  `<scope>:acme`-style surface without ever touching the general one;
+  **always-ask** ("no, ask every time") is applied as a real correction — a
+  real conflict record, not a shrug; **ambiguous** phrasing gets one neutral
+  re-prompt, never guessed at.
+
+This closes Learning Governance Section 6.3 ("ALDRIC cannot elevate its own
+confidence unilaterally") in the harder direction than before: a
+memory-check success — `decide_cascade` resolving silently — never grows
+confidence by itself. Confidence still only ever moves through a real,
+classified operator utterance. `tests/test_confidence_cascade.py` (21
+tests) is the branch-by-branch proof, in particular
+`test_generalize_and_scope_narrow_are_independent_histories`, which checks
+that a scoped "yes, for Acme" and a later general "yes" never leak into
+each other's confirmation counts.
+
+What's still open: `DEFAULT_PROMOTION_THRESHOLDS`/
+`DEFAULT_PATTERN_CLUSTER_SIZE` calibration against real usage was already
+open before this (see gap list item 8) and this doesn't change that; and,
+more importantly, this is only proven at the deterministic-dispatch level
+so far. Nothing in this codebase has run the model's actual `blocking`
+self-report or its phrasing of a reflective question against a real Claude
+API call yet (`llm/client.py`'s `complete()` is mocked in every test here)
+— whether the model asks reflective questions well in practice, and
+reports `blocking` sensibly, is unverified until that happens.
 
 ## The real Surface Matcher
 
@@ -485,9 +554,13 @@ This is a governance *kernel*, not a finished ALDRIC. To go further:
    "Learning Governance in live conversation" above for the full picture.
    These are exactly the surfaces item 1's real matcher now matches proposed
    tool calls against — the two pieces were built to fit together, not in
-   parallel by accident. Still open: calibrating
-   `DEFAULT_PROMOTION_THRESHOLDS`/`DEFAULT_PATTERN_CLUSTER_SIZE` against real
-   usage instead of the starting defaults picked here.
+   parallel by accident. Whether to ask about one of these surfaces at all,
+   and what a repeat answer for the same scope actually does to it, is now
+   its own layer on top — see "The Confidence Cascade" above. Still open:
+   calibrating `DEFAULT_PROMOTION_THRESHOLDS`/`DEFAULT_PATTERN_CLUSTER_SIZE`
+   against real usage instead of the starting defaults picked here, and
+   exercising the cascade's own `blocking` self-report against a real model
+   call rather than only the mocked test suite.
 9. ~~Capability execution ("the Capability Broker").~~ **Half-done.**
    `core/capability_broker.py` is a real executor for two connectors: Gmail
    (send/draft) and Google Calendar (create/update/delete event) — see
