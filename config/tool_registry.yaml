@@ -1,0 +1,116 @@
+# ALDRIC Tool Registry — declarative, compliance-editable.
+#
+# Loaded and validated by core/tool_registry_loader.py; consumed by
+# core/pa_action_kernel.py as TOOL_REGISTRY, exactly the way a hardcoded
+# Python dict literal used to be. See CLAUDE.md Section 2 and Section 10.
+#
+# WHAT THIS FILE CAN CHANGE, without anyone touching source code:
+#   - which tools exist
+#   - whether a given tool is external_facing (visible outside ALDRIC/the
+#     operator once it runs) and/or reversible
+#   - which of the six *existing* Permanent Tier C categories a tool's
+#     arguments structurally touch (permanent_categories)
+#
+# WHAT THIS FILE CANNOT CHANGE, ever, from here:
+#   - the six-category set itself. That set is
+#     models.schemas.PERMANENT_TIER_C_CATEGORIES, a Python constant with no
+#     API endpoint and no config file of its own (CLAUDE.md Section 2). Any
+#     permanent_categories value below that isn't already one of
+#     pricing_or_cost_commitment, scope_commitment_or_change,
+#     deadline_commitment, contractual_terms_or_obligation, legal_matter,
+#     binding_obligation is REJECTED at load time — the process refuses to
+#     start rather than silently ignoring an unrecognized tag or, worse,
+#     silently accepting a made-up "safe" category. There is no way to
+#     define a seventh category from this file, by design.
+#   - what happens once a tool is tagged with a permanent category:
+#     core.pa_action_kernel.classify_tier() forces Tier C unconditionally
+#     for any tagged tool, regardless of anything else in this file or in
+#     the request. That logic lives in Python and stays in Python.
+#
+# An unrecognized tool name (a typo, a name that was never added here) does
+# not "fall through" to some default in this file — core.pa_action_kernel's
+# build_action_request() fails safe for anything not present here, treating
+# it as touching every permanent category (forced to Tier C) rather than
+# guessing it's fine.
+
+tools:
+  # --- Illustrative entries from the source PA Action Kernel spec, kept as
+  # worked examples of what a Permanent Tier C tag looks like in practice.
+  log_internal_note:
+    permanent_categories: []
+    external_facing: false
+    reversible: true
+
+  schedule_internal_reminder:
+    permanent_categories: []
+    external_facing: false
+    reversible: true
+
+  draft_client_email:
+    permanent_categories: []
+    external_facing: true
+    reversible: true
+
+  send_client_email:
+    permanent_categories: []
+    external_facing: true
+    reversible: false
+
+  update_pricing:
+    permanent_categories: [pricing_or_cost_commitment]
+    external_facing: true
+    reversible: false
+
+  change_project_scope:
+    permanent_categories: [scope_commitment_or_change]
+    external_facing: true
+    reversible: false
+
+  commit_deadline:
+    permanent_categories: [deadline_commitment]
+    external_facing: true
+    reversible: false
+
+  sign_contract:
+    permanent_categories: [contractual_terms_or_obligation, binding_obligation]
+    external_facing: true
+    reversible: false
+
+  send_legal_correspondence:
+    permanent_categories: [legal_matter]
+    external_facing: true
+    reversible: false
+
+  # --- Real tools, wired to core.capability_broker (Gmail + Calendar).
+  # permanent_categories stays [] here on purpose, same as in the original
+  # hardcoded registry: a real pricing/deadline/contract commitment made
+  # *through* an email or calendar invite is still caught, because
+  # core.permanent_category_scan runs over the actual argument text
+  # regardless of which tool carried it — a tool being generically "an
+  # email" doesn't exempt its contents. Do not "fix" this by tagging these
+  # tools with categories; that would make every email Tier C regardless of
+  # content, which is not what the source document specifies.
+  create_email_draft:
+    permanent_categories: []
+    external_facing: false
+    reversible: true
+
+  send_email:
+    permanent_categories: []
+    external_facing: true
+    reversible: false
+
+  create_calendar_event:
+    permanent_categories: []
+    external_facing: true
+    reversible: true
+
+  update_calendar_event:
+    permanent_categories: []
+    external_facing: true
+    reversible: true
+
+  delete_calendar_event:
+    permanent_categories: []
+    external_facing: true
+    reversible: false

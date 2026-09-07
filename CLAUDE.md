@@ -99,3 +99,33 @@ first; the broker's only job is to run what it's told, and to raise
 When you change a `core/` module, the relevant test in `tests/` should be the
 thing that tells you whether you preserved the invariant or quietly broke it.
 Run `pytest` before considering any change to `core/` done.
+
+## 10. The Tool Registry is declarative; the Permanent Category Set is not
+
+`core/pa_action_kernel.py`'s `TOOL_REGISTRY` is loaded from
+`config/tool_registry.yaml` by `core/tool_registry_loader.py`, not written
+as a Python dict literal. This is a deliberate, narrow exception to Section
+1's "never rely on the LLM's own output" framing extended one step further:
+it is fine — good, even — for a *human, reviewed, version-controlled* file
+to own which tools exist and whether each is external-facing, reversible,
+and which Permanent Tier C categories it touches, because none of that can
+ever reach above what Section 2's structural floor allows. A compliance
+team editing this file can misclassify a tool (mark something
+external-facing that shouldn't be); that is a real risk to manage with
+normal review discipline on the file, same as any other config change. What
+they cannot do, structurally, is make a permanent-category tool stop being
+Tier C, or invent a category outside the six `PERMANENT_TIER_C_CATEGORIES`
+already defines — `tool_registry_loader.load_tool_registry()` rejects any
+unrecognized category tag at load time (`ToolRegistryError`, fail closed,
+process refuses to start) rather than accepting it silently.
+
+Do not extend this pattern to `PERMANENT_TIER_C_CATEGORIES` itself, to the
+confirmation/emission vocabularies (Section 3), or to anything else Section
+1 and 2 already fix in Python. Those are the structural floor precisely
+because they are *not* reachable from a file a request, a misconfiguration,
+or a support ticket could quietly edit. "Can a compliance team manage this
+without touching source?" is the right question to ask of a *new* piece of
+declarative data (which tool maps to which tag); it is the wrong question
+to ask of the tags' own meaning or the closed set they're drawn from — the
+answer there stays "no, that's a protocol amendment," same as Section 2
+already says.

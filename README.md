@@ -276,6 +276,49 @@ and there's no per-operator choice yet about *which* Google account or
 whether to disable real execution entirely — today, a working
 `client_secret.json` means every cleared Tier A/B call really runs.
 
+## Idempotency Ledger (crash/retry safety around real execution)
+
+Once `core/capability_broker.py` started calling real APIs, a crash or a
+retried turn between "the call was made" and "the digest recorded it"
+could send the same email twice. `core/idempotency_ledger.py` closes that
+gap: `aldric_chat._execute_cleared_tool_call` runs every broker call
+through `idempotency_ledger.run_idempotent`, which claims a durable
+PENDING row (a race-free INSERT, `storage.db.claim_idempotency_key`)
+before executing, and flips it to COMPLETED or FAILED once the broker call
+returns or raises — never leaving it PENDING. A repeat of the exact same
+call (same tool + arguments, or an explicit caller-supplied key) returns
+the already-stored result instead of executing again; a repeat while the
+original is still PENDING raises `AlreadyInFlightError` instead of
+racing it; a repeat of a FAILED call raises `ActionAlreadyFailedError`
+unless the caller explicitly passes `retry_failed=True`.
+`idempotency_ledger.list_stuck_pending_actions()` is the health-check path
+for rows that stayed PENDING past a crash — it only surfaces candidates,
+it never auto-resolves them (see that module's docstring for why: this
+codebase doesn't let a heuristic decide an execution-integrity fact any
+more than it lets one decide a governance one). This is deliberately not a
+tier/permission decision — `classify_tier()` still, and only, decides
+whether an action may run at all; see `tests/test_idempotency_ledger.py`.
+
+## Declarative Tool Registry (`config/tool_registry.yaml`)
+
+`core/pa_action_kernel.py`'s `TOOL_REGISTRY` — which tools exist, and for
+each one whether it's external-facing, reversible, and which Permanent
+Tier C categories it touches — is loaded and schema-validated from
+`config/tool_registry.yaml` by `core/tool_registry_loader.py`, not written
+as a Python dict literal. A compliance team can add a tool or change its
+tags by editing that file; no source change, no touching `core/`. What
+does *not* move to that file, on purpose: the six-category set itself
+(`models.schemas.PERMANENT_TIER_C_CATEGORIES`) and what a permanent-
+category tag actually does (`classify_tier()` forcing Tier C
+unconditionally) both stay Python. Any category name in the YAML file that
+isn't already one of the six existing categories is a load-time error
+(`ToolRegistryError`, fails closed — the process refuses to start) rather
+than a silently-ignored typo or a silently-accepted new "safe" category.
+See CLAUDE.md Section 10 and `tests/test_tool_registry_loader.py` —
+including a test that reclassifies a tool from Tier A to Tier B to Tier C
+purely by editing the file, with zero Python changes, which is the actual
+proof of the claim above.
+
 ## Using the browser UI (`webapp.py`)
 
 `webapp.py` is `chat.py`'s exact governed sequence over a WebSocket instead of

@@ -7,15 +7,19 @@ Stack section).
 
 This is the module where "not prompt-based anymore" earns its keep the
 most concretely. The single most important property in this whole codebase
-lives in `classify_tier()` below: an action's tier is decided from a static,
-code-owned registry (`TOOL_REGISTRY`) and the caller-supplied structural
+lives in `classify_tier()` below: an action's tier is decided from a
+schema-validated, declarative registry (`TOOL_REGISTRY`, loaded from
+config/tool_registry.yaml by core.tool_registry_loader — see that module
+and CLAUDE.md Section 10 for why the tool-to-tag mapping is a file a
+compliance team can edit, while the six-category set it can only reference,
+never extend, stays a Python constant) and the caller-supplied structural
 facts (surface state, drift, mirror-drift flag) — never from whatever the
 LLM says its own tier should be. `ActionRequest.claimed_tier` is carried
 through purely for audit/comparison logging. If a future prompt injection
 gets a model to say "this is Tier A, proceed silently" about a pricing
 change, `classify_tier` still returns Tier C, because pricing is in
 PERMANENT_TIER_C_CATEGORIES and that set is not reachable from anywhere the
-LLM's output lands.
+LLM's output lands, or from the tool registry file either.
 """
 from __future__ import annotations
 
@@ -31,6 +35,7 @@ from models.schemas import (
     Surface,
     Tier,
 )
+from core.tool_registry_loader import DEFAULT_REGISTRY_PATH, load_tool_registry
 from storage import db
 from storage.event_log import write_event, read_events
 
@@ -68,38 +73,38 @@ class NullSurfaceMatcher:
         return None
 
 
-# Static tool/action registry. Each entry is the code-owned declaration of
-# what a tool touches. This is the direct analogue of the Gemini spec's
-# TOOL_REGISTRY, but keyed to the six real Permanent Tier C categories
-# (Section 3.3) instead of a generic Tier A/B/C guess.
-TOOL_REGISTRY: dict[str, dict] = {
-    "log_internal_note": {"permanent_categories": frozenset(), "external_facing": False, "reversible": True},
-    "schedule_internal_reminder": {"permanent_categories": frozenset(), "external_facing": False, "reversible": True},
-    "draft_client_email": {"permanent_categories": frozenset(), "external_facing": True, "reversible": True},
-    "send_client_email": {"permanent_categories": frozenset(), "external_facing": True, "reversible": False},
-    "update_pricing": {"permanent_categories": frozenset({"pricing_or_cost_commitment"}), "external_facing": True, "reversible": False},
-    "change_project_scope": {"permanent_categories": frozenset({"scope_commitment_or_change"}), "external_facing": True, "reversible": False},
-    "commit_deadline": {"permanent_categories": frozenset({"deadline_commitment"}), "external_facing": True, "reversible": False},
-    "sign_contract": {"permanent_categories": frozenset({"contractual_terms_or_obligation", "binding_obligation"}), "external_facing": True, "reversible": False},
-    "send_legal_correspondence": {"permanent_categories": frozenset({"legal_matter"}), "external_facing": True, "reversible": False},
+# Tool/action registry. What a tool touches — categories, external-facing,
+# reversible — is declarative data now (config/tool_registry.yaml), loaded
+# and schema-validated by core.tool_registry_loader at import time; it is
+# no longer a Python dict literal. This is the direct analogue of the
+# Gemini spec's TOOL_REGISTRY, keyed to the six real Permanent Tier C
+# categories (Section 3.3) instead of a generic Tier A/B/C guess.
+#
+# What moving this to a file does NOT change (CLAUDE.md Section 10): the
+# six-category set itself stays PERMANENT_TIER_C_CATEGORIES, a Python
+# constant the loader validates every entry's tags against — an
+# unrecognized category in the file is a load-time error, not a runtime
+# toggle. And classify_tier() below, which decides what a permanent-
+# category tag actually does, is unchanged Python control flow. Only the
+# tool-to-tag mapping itself — the part a compliance team legitimately
+# needs to manage without a source change — moved out.
+#
+# reload_tool_registry() exists for tooling/tests that need to point at a
+# different file; call it with no arguments to reload the default file
+# in place (e.g. after a compliance team edits it) without reassigning the
+# module attribute from outside. A production deployment should still
+# redeploy on a registry change rather than rely on hot-reload for its own
+# sake — this function is for local iteration and test isolation, not a
+# claim that live reload is a substitute for the review/versioning
+# discipline a file under source control already gives you (CLAUDE.md
+# Section 5: say what's real).
+TOOL_REGISTRY: dict[str, dict] = load_tool_registry()
 
-    # Real tools, wired to core.capability_broker (README gap-list item 9).
-    # Everything above this line was an example registered so classify_tier
-    # had something concrete to classify before any real capability existed;
-    # these are the first entries a matched, rights-confirmed surface can
-    # actually cause to run in the world. Permanent-category tags stay
-    # frozenset() here on purpose: a real pricing/deadline/contract
-    # commitment made *through* an email or calendar invite is still caught,
-    # because core.permanent_category_scan runs over the actual argument
-    # text (see llm/aldric_reply.py's tool_argument_categories) regardless
-    # of which tool carried it — a tool being generically "an email" doesn't
-    # make its contents exempt.
-    "create_email_draft": {"permanent_categories": frozenset(), "external_facing": False, "reversible": True},
-    "send_email": {"permanent_categories": frozenset(), "external_facing": True, "reversible": False},
-    "create_calendar_event": {"permanent_categories": frozenset(), "external_facing": True, "reversible": True},
-    "update_calendar_event": {"permanent_categories": frozenset(), "external_facing": True, "reversible": True},
-    "delete_calendar_event": {"permanent_categories": frozenset(), "external_facing": True, "reversible": False},
-}
+
+def reload_tool_registry(path: str = DEFAULT_REGISTRY_PATH) -> dict[str, dict]:
+    global TOOL_REGISTRY
+    TOOL_REGISTRY = load_tool_registry(path)
+    return TOOL_REGISTRY
 
 
 # PA Action Kernel Tier B: "PA signature discloses AI authorship
