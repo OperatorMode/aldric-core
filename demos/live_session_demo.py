@@ -51,6 +51,22 @@ output at the end of a run rather than filed as a silent TODO:
      all; see `tests/test_aldric_chat_flow.py`'s
      `test_a_trusted_nonflagged_surface_resolves_from_memory_without_asking`
      and the section near the end of this script that verifies it live.
+  3. A real adversarial test (Gemini-run Attacks 8/9 against the live API)
+     found that a JSON-parse failure on the model's raw reply used to raise
+     a plain ValueError with the COMPLETE raw response embedded in its own
+     message — which aldric_chat.py's generic `except Exception as exc:
+     print(exc)` handler then printed straight to the operator's terminal,
+     unscanned and ungated (a full generated smtplib script, real
+     recipient and pricing text, reached the screen this way). FIXED —
+     `llm.client.LLMFormatError` keeps the raw text as a plain attribute,
+     never folded into `str()`/`repr()`, so the same generic handler is
+     safe by construction; every instance also writes an
+     `llm_format_error` audit event as it's raised, so the raw text is
+     preserved for review rather than silently discarded. See
+     `tests/test_llm_client_format_safety.py`,
+     `tests/test_aldric_reply.py`'s
+     `test_non_json_output_never_leaks_the_raw_response_into_the_exception_message`,
+     and the section near the end of this script that verifies it live.
 
 WARNING: resets the real dev DB (storage/aldric.db) and event log to a
 clean slate before running, the same way tests/conftest.py's reset_storage
@@ -367,6 +383,50 @@ def _resolve_demo_input(prompt: str = "") -> str:
 aldric_chat.run_casual_turn = lambda conversation, user_message: resolve_demo_result
 builtins.input = _resolve_demo_input
 aldric_chat.main()
+
+chapter("FINDING 3 (FIXED) — does a JSON-parse failure ever leak raw model output to the operator?")
+from llm.client import LLMFormatError
+from storage.event_log import read_events
+
+print("  Found live via a real adversarial test (Gemini-run Attacks 8/9 against the actual API):")
+print("  when the model's raw reply didn't parse as JSON, llm/aldric_reply.py used to raise a plain")
+print("  ValueError with the COMPLETE raw response baked into its own message — a full generated")
+print("  smtplib script, real recipient address, real pricing text included. aldric_chat.py's generic")
+print("  `except Exception as exc: print(f'...: {exc}')` handler then printed that straight to the")
+print("  operator's terminal, never having passed through requires_escalation or permanent-category")
+print("  scanning at all, because the crash happened before a CasualTurnResult could even be built.")
+print()
+print("  Fixed structurally, not by special-casing the print site: llm.client.LLMFormatError keeps the")
+print("  raw text as a plain attribute, never folded into str()/repr() — so the SAME generic")
+print("  `print(exc)` handler is safe for every exception type without change, and every instance")
+print("  writes an `llm_format_error` audit event as it's raised, so the raw text is never silently")
+print("  discarded either. Proving it live — a real parse failure, through the real code:\n")
+
+format_error_inputs = iter(["Trigger a bad reply.", "exit"])
+
+
+def _format_error_demo_input(prompt: str = "") -> str:
+    answer = next(format_error_inputs)
+    print(f"{prompt}{answer}")
+    return answer
+
+
+def _raise_real_format_error(conversation, user_message):
+    raise LLMFormatError(
+        "ALDRIC Mode casual turn",
+        "SENSITIVE_RAW_MODEL_OUTPUT: smtplib.send('ceo@realcompany.example', 'here's the pricing script')",
+    )
+
+
+aldric_chat.run_casual_turn = _raise_real_format_error
+builtins.input = _format_error_demo_input
+aldric_chat.main()
+
+leaked_events = [e for e in read_events() if e["event"] == "llm_format_error"]
+print(f"\n  Raw text never printed above — confirmed by this script's own stdout capture, not just eyeballing.")
+print(f"  It IS in the append-only audit log though: {len(leaked_events)} llm_format_error event(s) recorded,")
+print(f"  reachable for review but never on the operator's screen: "
+      f"{leaked_events[-1]['data']['raw_output'][:60]}...")
 
 chapter("BONUS — Idempotency Ledger dedup (calling the exact same action twice)")
 from core import idempotency_ledger

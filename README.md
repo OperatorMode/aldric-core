@@ -42,7 +42,7 @@ Run it:
 
 ```bash
 pip install -r requirements.txt
-pytest                    # 217 tests, all deterministic, no network calls
+pytest                    # 234 tests, all deterministic, no network calls
 uvicorn main:app --reload # http://127.0.0.1:8000/docs for interactive API
 
 export ANTHROPIC_API_KEY=sk-ant-...   # or Aldric-API, matching the Windows machine's existing var
@@ -56,7 +56,7 @@ python demos/live_session_demo.py  # no API key, no Google credentials, no netwo
                                     # the confidence cascade's four reflective outcomes, First
                                     # Executable Crossing, Tier A/B tool execution, the digest)
                                     # and print exactly what the real code actually did. See
-                                    # that file's own docstring for two real findings it
+                                    # that file's own docstring for three real findings it
                                     # surfaced this way — not hypothetical, reproduced by
                                     # running it.
 ```
@@ -258,6 +258,83 @@ self-report or its phrasing of a reflective question against a real Claude
 API call yet (`llm/client.py`'s `complete()` is mocked in every test here)
 — whether the model asks reflective questions well in practice, and
 reports `blocking` sensibly, is unverified until that happens.
+
+## Failing safely when the model's reply won't parse (`llm/client.py`'s `LLMFormatError`)
+
+Found live, the same way the resolve gap above was: a real adversarial test
+(a second AI red-teaming the actual running `aldric_chat.py` against a real
+Claude API key) got the model to reply to a casual turn with prose, then an
+unrelated generated script, then — buried at the end — the structured JSON
+`run_casual_turn` actually needed. `json.loads` on that failed, exactly as
+designed (CLAUDE.md's whole point: never guess at malformed structured
+output). What wasn't designed was what happened next: the parse failure
+raised a plain `ValueError` with the model's *complete* raw response baked
+into its own message, and `aldric_chat.py`'s generic
+`except Exception as exc: print(f"...: {exc}")` — there so one bad turn
+doesn't kill the whole session — printed that straight to the operator's
+terminal. A full generated `smtplib` script, real recipient address, real
+pricing text, reached the screen this way, having never passed through
+`requires_escalation` or the permanent-category scanner at all, because the
+crash happened before a `CasualTurnResult` could even be constructed for
+those checks to run against. No actual action executed — the Capability
+Broker was never invoked — but ungated model output reached the operator,
+which is exactly the failure class Section 1 exists to prevent one layer
+up.
+
+The same three-line pattern (`json.loads(strip_json_code_fence(raw))` with
+no exception handling, or a `ValueError(f"...: {raw!r}")` that a generic
+handler upstream then prints) turned out to be repeated at every LLM
+call site that asks for JSON-only output: `llm/dsd_interview.py`,
+`llm/governed_reply.py`, and all four calls inside `llm/ksp_finality.py`.
+Two of those — `chat.py`'s calls into `run_interview_step` and
+`run_ksp_finality` — had no exception handling around them *at all*, so a
+parse failure there didn't leak text but did crash the entire session with
+an unhandled traceback, discarding a DSD or an in-progress adjudication.
+
+Fixed once, structurally, in `llm/client.py`, not by patching each print
+site individually:
+
+- **`LLMFormatError(context, raw)`** replaces every bare `ValueError` at
+  these call sites. `raw` is kept as a plain attribute, never folded into
+  `str()`/`repr()` — so `str(exc)` is always a short, safe, generic message
+  ("...returned output that could not be parsed as the expected JSON. The
+  raw response was logged for review, not displayed here."), and every
+  *existing* `except Exception as exc: print(exc)` handler anywhere in the
+  codebase becomes safe automatically, without needing to know this
+  exception type exists. Constructing one also writes an `llm_format_error`
+  event to the append-only audit log (`storage/event_log.py`) unconditionally
+  — so the raw text is never silently discarded, just kept off the display
+  path; it's reachable for review, and (per that module's own docstring)
+  telemetry never influences inference or gets surfaced through the Daily
+  Digest, which only ever shows what `log_digest_entry` explicitly adds.
+- **`extract_json_object(raw)`** replaces `strip_json_code_fence(raw)` at
+  every one of these call sites, as a secondary, purely-additive fix aimed
+  at the root cause rather than just its symptom: it also tries the last
+  fenced `{...}` block anywhere in the reply (not just one wrapping the
+  *entire* response) and, failing that, the widest brace span in the raw
+  text, before giving up — recovering the exact "talk first, answer last"
+  shape the live test actually produced. It never relaxes what counts as
+  valid JSON; a clean JSON-only reply parses on the first candidate exactly
+  as before.
+- The two previously-unwrapped call sites in `chat.py` (`run_interview_step`
+  inside `run_dsd_discovery`, `run_ksp_finality` inside `run_governed_session`)
+  now catch `LLMFormatError` explicitly and recover instead of crashing —
+  retrying the same interview step, or dropping just that one turn — since
+  in both cases nothing had been shown to or asked of the operator yet.
+
+`tests/test_llm_client_format_safety.py` proves `LLMFormatError`/
+`extract_json_object` directly; `tests/test_aldric_reply.py`'s
+`test_non_json_output_never_leaks_the_raw_response_into_the_exception_message`
+and `test_prose_then_fenced_json_still_parses_instead_of_raising` prove the
+fix end to end through `run_casual_turn` with a sensitive marker standing in
+for a real secret; `tests/test_chat_flow.py`'s
+`test_interview_step_parse_failure_retries_instead_of_crashing_the_session`
+and `tests/test_ksp_finality.py`'s
+`test_ksp_finality_parse_failure_does_not_crash_the_session_or_leak_raw_text`
+prove the two previously-unprotected `chat.py` call sites now degrade
+gracefully. `demos/live_session_demo.py`'s "FINDING 3 (FIXED)" section
+reproduces the whole thing live through the real code, including the audit
+log, if you want to see it run.
 
 ## The real Surface Matcher
 

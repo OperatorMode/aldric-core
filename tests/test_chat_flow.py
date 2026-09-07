@@ -12,6 +12,7 @@ import pytest
 import chat
 from core.apex_supervisor import HeuristicIDSDetector
 from core.ksp1_operator_kernel import AdjudicationStage
+from llm.client import LLMFormatError
 from llm.governed_reply import GovernedTurnResult
 from models.schemas import ConfirmationResult, KSPFinalityResult, KSPOutcome, classify_confirmation
 from storage import db
@@ -133,6 +134,33 @@ def test_a_plain_no_declines_and_restarts_discovery_instead_of_looping_forever(m
     out = capsys.readouterr().out
     assert "Understood — that's not right" in out
     assert dsd.locked is True
+
+
+def test_interview_step_parse_failure_retries_instead_of_crashing_the_session(monkeypatch, capsys):
+    """run_interview_step's call site in run_dsd_discovery had NO exception
+    handling at all before this fix — the one unprotected call in the
+    codebase around a raw-model-JSON parse. A malformed reply used to
+    propagate as a fully unhandled exception, killing the whole Discovery
+    Loop. Nothing was asked of the operator on a failed step, so retrying
+    is safe: proves the loop survives one failure and still locks once a
+    good reply arrives."""
+    calls = {"n": 0}
+
+    def _flaky_interview_step(conversation):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise LLMFormatError("DSD interview step", "SENSITIVE_RAW_MODEL_OUTPUT should never print")
+        return _complete_interview_step(conversation)
+
+    monkeypatch.setattr(chat, "run_interview_step", _flaky_interview_step)
+    monkeypatch.setattr(chat, "_build_ids_detector", lambda: HeuristicIDSDetector())
+    monkeypatch.setattr("builtins.input", _scripted_inputs("confirmed"))
+
+    dsd = chat.run_dsd_discovery()
+    out = capsys.readouterr().out
+    assert calls["n"] == 2
+    assert dsd.locked is True
+    assert "SENSITIVE_RAW_MODEL_OUTPUT" not in out
 
 
 def test_ordinary_turn_shows_output_without_adjudication(monkeypatch, capsys):

@@ -20,7 +20,7 @@ from __future__ import annotations
 import json
 
 from models.schemas import DSDField
-from llm.client import DEFAULT_MODEL, complete, strip_json_code_fence
+from llm.client import DEFAULT_MODEL, LLMFormatError, complete, extract_json_object
 
 _SYSTEM_PROMPT = """You are running the KSP-0 / DSD Discovery Loop for ALDRIC, a governance
 system. Your ONLY job this turn is to extract, from the conversation so far,
@@ -77,9 +77,9 @@ def run_interview_step(conversation: list[dict[str, str]]) -> dict:
     # truncated/invalid JSON. 2000 leaves real headroom for both.
     raw = complete(system=_SYSTEM_PROMPT, user_message=transcript, model=DEFAULT_MODEL, max_tokens=2000)
     try:
-        parsed = json.loads(strip_json_code_fence(raw))
+        parsed = json.loads(extract_json_object(raw))
     except json.JSONDecodeError as exc:
-        raise ValueError(f"DSD interview step returned non-JSON output: {raw!r}") from exc
+        raise LLMFormatError("DSD interview step", raw) from exc
 
     known_fields = {f.value for f in DSDField}
     extracted = {k: v for k, v in parsed.get("extracted_fields", {}).items() if k in known_fields}

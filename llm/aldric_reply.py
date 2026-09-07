@@ -71,7 +71,7 @@ import core.long_term_memory as long_term_memory
 from core.aldric_mode import EscalationSignal, requires_escalation
 from core.pa_action_kernel import build_action_request, classify_tier
 from core.permanent_category_scan import scan_for_permanent_categories
-from llm.client import DEFAULT_MODEL, complete, strip_json_code_fence
+from llm.client import DEFAULT_MODEL, LLMFormatError, complete, extract_json_object
 from llm.surface_matcher import match_surface
 from models.schemas import PERMANENT_TIER_C_CATEGORIES, Surface, Tier
 from storage import db
@@ -224,9 +224,9 @@ def run_casual_turn(conversation: list[dict[str, str]], user_message: str) -> Ca
     raw = complete(system=system_prompt, user_message=full_user_message, model=DEFAULT_MODEL, max_tokens=4000)
 
     try:
-        parsed = json.loads(strip_json_code_fence(raw))
+        parsed = json.loads(extract_json_object(raw))
     except json.JSONDecodeError as exc:
-        raise ValueError(f"ALDRIC Mode casual turn returned non-JSON output: {raw!r}") from exc
+        raise LLMFormatError("ALDRIC Mode casual turn", raw) from exc
 
     output_text = parsed.get("output", "")
     self_reported = frozenset(

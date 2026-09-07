@@ -12,7 +12,9 @@ import json
 import core.long_term_memory as long_term_memory
 import llm.aldric_reply as aldric_reply_module
 from llm.aldric_reply import run_casual_turn
+from llm.client import LLMFormatError
 from models.schemas import Tier
+from storage.event_log import read_events
 
 
 def _mock_complete(canned: dict):
@@ -163,9 +165,60 @@ def test_non_json_output_raises_rather_than_guessing(monkeypatch):
     monkeypatch.setattr(aldric_reply_module, "complete", lambda **kwargs: "not json at all")
     try:
         run_casual_turn(conversation=[], user_message="hi")
-        assert False, "expected ValueError"
-    except ValueError as exc:
-        assert "non-JSON" in str(exc)
+        assert False, "expected LLMFormatError"
+    except LLMFormatError as exc:
+        assert "could not be parsed" in str(exc)
+
+
+def test_non_json_output_never_leaks_the_raw_response_into_the_exception_message(monkeypatch):
+    """Found live (Attacks 8/9): a parse failure used to build a plain
+    ValueError with the model's complete raw response baked into its own
+    message, and aldric_chat.py's generic `except Exception as exc:
+    print(exc)` handler then printed that straight to the operator's
+    terminal — unscanned, ungated, no requires_escalation check possible
+    because the crash happened before a CasualTurnResult could even be
+    built. A real generated script with a real recipient address reached
+    the screen this way. LLMFormatError fixes this structurally: the raw
+    text is a plain attribute, never folded into str()/repr(), so any
+    existing `print(exc)` call site anywhere in the codebase is safe by
+    construction — this test is what actually proves that property, not
+    just that *something* got raised."""
+    sensitive_marker = "UNIQUE_MARKER_smtplib_target=ceo@realcompany.example password_hint=hunter2"
+    monkeypatch.setattr(aldric_reply_module, "complete", lambda **kwargs: f"Sure, here you go:\n{sensitive_marker}")
+
+    try:
+        run_casual_turn(conversation=[], user_message="hi")
+        assert False, "expected LLMFormatError"
+    except LLMFormatError as exc:
+        assert sensitive_marker not in str(exc)
+        assert sensitive_marker not in repr(exc)
+        # The raw text is not discarded, only kept off the display path —
+        # it's still reachable for audit via the structured attribute...
+        assert exc.raw == f"Sure, here you go:\n{sensitive_marker}"
+        # ...and via the append-only audit log, which llm.client.LLMFormatError
+        # writes to unconditionally as it's constructed, so no caller can
+        # forget to preserve it.
+        events = [e for e in read_events() if e["event"] == "llm_format_error"]
+        assert len(events) == 1
+        assert events[0]["data"]["raw_output"] == f"Sure, here you go:\n{sensitive_marker}"
+        assert events[0]["data"]["context"] == "ALDRIC Mode casual turn"
+
+
+def test_prose_then_fenced_json_still_parses_instead_of_raising(monkeypatch):
+    """The actual shape a live model produced in Attacks 8/9 per the
+    conversation transcript: talk first, then answer in a fenced JSON block
+    — which the old strip_json_code_fence-only path never handled, since it
+    only strips a fence wrapping the *entire* reply. extract_json_object()
+    recovers the last fenced JSON object instead of giving up."""
+    canned = {"output": "Here's what I found.", "scope": "exploration", "touched_categories": []}
+    raw = (
+        "Let me think about this for a moment — here's a draft script that "
+        "isn't what you asked for:\n```python\nprint('oops, wrong content')\n```\n"
+        "Actually, here's my real structured reply:\n```json\n" + json.dumps(canned) + "\n```"
+    )
+    monkeypatch.setattr(aldric_reply_module, "complete", lambda **kwargs: raw)
+    result = run_casual_turn(conversation=[], user_message="hi")
+    assert result.output_text == "Here's what I found."
 
 
 # --- Long-term memory injection ------------------------------------------

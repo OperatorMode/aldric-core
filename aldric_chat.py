@@ -322,6 +322,21 @@ def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None
 
         try:
             result = run_casual_turn(conversation, user_message)
+        # A live adversarial test found that a JSON-parse failure here used
+        # to raise a plain ValueError whose message embedded the model's
+        # complete raw response — which this generic handler then printed
+        # straight to the operator's terminal, unscanned and ungated
+        # (Attacks 8/9: a full generated smtplib script, real recipient
+        # and pricing text included, reached the screen this way, never
+        # even having passed through requires_escalation or permanent-
+        # category scanning, since the crash happened before a
+        # CasualTurnResult could be built). Fixed at the source, not here:
+        # llm/aldric_reply.py now raises llm.client.LLMFormatError, whose
+        # str() is always a safe generic message — the raw text lives only
+        # on its `.raw` attribute and in the audit log (llm/client.py
+        # writes an `llm_format_error` event as it's raised) — so this
+        # same generic `except Exception as exc: print(exc)` is safe for
+        # every exception type without needing to special-case one here.
         except Exception as exc:
             print(f"\n(ALDRIC Mode turn failed: {exc})")
             continue
@@ -435,6 +450,9 @@ def run_casual_session(conversation: list[dict[str, str]] | None = None) -> None
 
                 conversation.append({"role": "user", "content": answer})
 
+                # Same call, same safety property as the first run_casual_turn
+                # site above (see its comment): LLMFormatError.str() is
+                # always safe to print, so this generic handler is safe too.
                 try:
                     result = run_casual_turn(conversation, answer)
                 except Exception as exc:

@@ -38,6 +38,7 @@ from core.ksp0_dsd import DSDGate, DSDGateError, build_dsd
 from core.ksp1_operator_kernel import AdjudicationBuffer
 from core.ksp_finality import run_ksp_finality
 from core.pa_action_kernel import generate_daily_digest, log_digest_entry
+from llm.client import LLMFormatError
 from llm.dsd_interview import run_interview_step
 from llm.governed_reply import run_governed_turn
 from llm.sidecar import SidecarIDSDetector
@@ -85,7 +86,20 @@ def run_dsd_discovery(
     fields: dict[str, object] = {}
 
     while True:
-        step = run_interview_step(conversation)
+        try:
+            step = run_interview_step(conversation)
+        except LLMFormatError as exc:
+            # Found alongside the casual-turn leak this same session: this
+            # call was the one site in the codebase with NO exception
+            # handling around a raw-model-JSON parse at all — a malformed
+            # reply here didn't leak anything (LLMFormatError's own message
+            # is always safe, never the raw text — see llm/client.py), but
+            # it did crash the whole Discovery Loop with an unhandled
+            # traceback, discarding everything gathered so far. Nothing was
+            # asked this turn, so simply asking the model again is safe.
+            print(f"\n({exc})")
+            print("Retrying that question.")
+            continue
         fields.update(step["extracted_fields"])
         if not step["missing_fields"]:
             break
@@ -342,7 +356,20 @@ def run_governed_session(
         if result.requires_adjudication:
             ksp_result = None
             if result.self_reported_scope == "finality" or result.touches_permanent_tier_c:
-                ksp_result = run_ksp_finality(dsd, result.output_text)
+                try:
+                    ksp_result = run_ksp_finality(dsd, result.output_text)
+                except LLMFormatError as exc:
+                    # Same class of gap as run_interview_step above: this
+                    # call site had no exception handling at all, so a
+                    # malformed reply from any of KSP Finality's six model
+                    # calls (llm/ksp_finality.py) would crash the entire
+                    # governed session instead of failing this one turn.
+                    # Nothing has been shown or adjudicated yet for this
+                    # artifact — safe to drop the turn and let the operator
+                    # try again, same recovery shape as the ordinary
+                    # run_governed_turn failure just above this block.
+                    print(f"\n({exc})")
+                    continue
 
             permanent_gate_applies = result.touches_permanent_tier_c or result.tool_effective_tier == Tier.C
 

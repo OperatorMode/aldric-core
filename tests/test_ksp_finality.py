@@ -337,3 +337,41 @@ def test_conditional_outcome_shows_the_conditional_note_and_still_adjudicates(mo
     assert "client budget ceiling" in out
     assert "ADJUDICATION REQUIRED" in out
     assert "[Conditional — depends on unresolved unknown(s): client budget ceiling]" in out
+
+
+def test_ksp_finality_parse_failure_does_not_crash_the_session_or_leak_raw_text(monkeypatch, capsys):
+    """core.ksp_finality.run_ksp_finality (and the six llm/ksp_finality.py
+    calls underneath it) had no exception handling at chat.py's call site at
+    all before this fix — a JSON-parse failure anywhere in that six-call
+    chain would propagate as a fully unhandled exception and crash the
+    entire governed session, discarding the DSD and everything already
+    confirmed. Proves the fix: the turn is dropped, the session survives,
+    and — since llm.client.LLMFormatError's message never contains the raw
+    text (tests/test_llm_client_format_safety.py) — nothing sensitive
+    reaches the terminal even via the ordinary print(exc) recovery path."""
+    from llm.client import LLMFormatError
+
+    db.init_db()
+    monkeypatch.setattr(chat, "run_interview_step", _complete_interview_step)
+    monkeypatch.setattr(chat, "_build_ids_detector", _no_op_ids_detector)
+
+    finality_result = GovernedTurnResult(
+        reasoning="r", output_text="We recommend proceeding.",
+        self_reported_scope="finality", self_reported_categories=frozenset(),
+        scanned_categories=frozenset(),
+    )
+    monkeypatch.setattr(chat, "run_governed_turn", lambda dsd, conv, msg, profile_fragment="": finality_result)
+
+    def _raise_format_error(dsd, candidate):
+        raise LLMFormatError("KSP Finality compaction", "SENSITIVE_RAW_MODEL_OUTPUT should never print")
+
+    monkeypatch.setattr(chat, "run_ksp_finality", _raise_format_error)
+    monkeypatch.setattr(
+        "builtins.input",
+        _scripted_inputs("confirmed", "should we proceed", "exit"),
+    )
+
+    chat.main()  # must not raise
+    out = capsys.readouterr().out
+    assert "SENSITIVE_RAW_MODEL_OUTPUT" not in out
+    assert "ADJUDICATION REQUIRED" not in out

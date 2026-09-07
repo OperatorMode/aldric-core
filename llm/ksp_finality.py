@@ -34,7 +34,7 @@ from __future__ import annotations
 
 import json
 
-from llm.client import DEFAULT_MODEL, SIDECAR_MODEL, complete, strip_json_code_fence
+from llm.client import DEFAULT_MODEL, SIDECAR_MODEL, LLMFormatError, complete, extract_json_object
 from models.schemas import (
     DecisionSurfaceDocument,
     IntegrityGateResult,
@@ -73,7 +73,10 @@ def project_structure(dsd: DecisionSurfaceDocument, candidate_claim: str) -> Str
     # See llm/dsd_interview.py for why these budgets across this file were
     # raised from their original "no thinking" sizes.
     raw = complete(system=_PROJECTION_SYSTEM, user_message=user_message, model=SIDECAR_MODEL, max_tokens=1200)
-    parsed = json.loads(strip_json_code_fence(raw))
+    try:
+        parsed = json.loads(extract_json_object(raw))
+    except json.JSONDecodeError as exc:
+        raise LLMFormatError("KSP Finality structural projection", raw) from exc
     return StructuralProjection(
         actors=list(parsed.get("actors", [])),
         incentives=list(parsed.get("incentives", [])),
@@ -121,7 +124,10 @@ def run_validation_thread(
         f"Candidate claim:\n{candidate_claim}"
     )
     raw = complete(system=_thread_system(thread), user_message=user_message, model=SIDECAR_MODEL, max_tokens=800)
-    parsed = json.loads(strip_json_code_fence(raw))
+    try:
+        parsed = json.loads(extract_json_object(raw))
+    except json.JSONDecodeError as exc:
+        raise LLMFormatError(f"KSP Finality validation thread ({thread})", raw) from exc
     return ValidationThreadResult(
         thread=thread,
         passed=bool(parsed.get("passed", False)),
@@ -165,7 +171,10 @@ def audit_integrity(
         f"Candidate claim:\n{candidate_claim}"
     )
     raw = complete(system=_INTEGRITY_SYSTEM, user_message=user_message, model=SIDECAR_MODEL, max_tokens=1000)
-    parsed = json.loads(strip_json_code_fence(raw))
+    try:
+        parsed = json.loads(extract_json_object(raw))
+    except json.JSONDecodeError as exc:
+        raise LLMFormatError("KSP Finality integrity gate", raw) from exc
     return IntegrityGateResult(
         keystone_stable=bool(parsed.get("keystone_stable", False)),
         forward_inverse_consistent=bool(parsed.get("forward_inverse_consistent", False)),
@@ -211,7 +220,10 @@ def compact(
         f"Candidate claim:\n{candidate_claim}"
     )
     raw = complete(system=_COMPACTION_SYSTEM, user_message=user_message, model=DEFAULT_MODEL, max_tokens=3000)
-    parsed = json.loads(strip_json_code_fence(raw))
+    try:
+        parsed = json.loads(extract_json_object(raw))
+    except json.JSONDecodeError as exc:
+        raise LLMFormatError("KSP Finality compaction", raw) from exc
     audit = [
         UnknownAuditFinding(unknown=f.get("unknown", ""), resolved=bool(f.get("resolved", False)))
         for f in parsed.get("unknown_audit", [])

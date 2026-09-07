@@ -49,7 +49,7 @@ from __future__ import annotations
 import json
 from typing import Optional
 
-from llm.client import DEFAULT_MODEL, complete, strip_json_code_fence
+from llm.client import DEFAULT_MODEL, complete, extract_json_object
 from models.schemas import ConfidenceState, Surface
 
 _SYSTEM_PROMPT = """You are the Surface Matcher for ALDRIC's PA Action Kernel (Section 2.2).
@@ -125,7 +125,7 @@ def match_surface(context: dict, candidate_surfaces: list[Surface]) -> Optional[
     raw = complete(system=_SYSTEM_PROMPT, user_message=prompt, model=DEFAULT_MODEL, max_tokens=4000)
 
     try:
-        parsed = json.loads(strip_json_code_fence(raw))
+        parsed = json.loads(extract_json_object(raw))
     except json.JSONDecodeError:
         return None  # fail closed, never fail open
 

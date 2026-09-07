@@ -51,7 +51,7 @@ from typing import Optional
 
 from core.pa_action_kernel import build_action_request, classify_tier, effective_tool_tier
 from core.permanent_category_scan import scan_for_permanent_categories
-from llm.client import DEFAULT_MODEL, complete, strip_json_code_fence
+from llm.client import DEFAULT_MODEL, LLMFormatError, complete, extract_json_object
 from models.schemas import DecisionSurfaceDocument, PERMANENT_TIER_C_CATEGORIES, Tier
 
 
@@ -167,9 +167,9 @@ def run_governed_turn(
     raw = complete(system=system, user_message=full_user_message, model=DEFAULT_MODEL, max_tokens=4000)
 
     try:
-        parsed = json.loads(strip_json_code_fence(raw))
+        parsed = json.loads(extract_json_object(raw))
     except json.JSONDecodeError as exc:
-        raise ValueError(f"Governed turn returned non-JSON output: {raw!r}") from exc
+        raise LLMFormatError("Governed turn", raw) from exc
 
     output_text = parsed.get("output", "")
     self_reported = frozenset(
