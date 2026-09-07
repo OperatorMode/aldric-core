@@ -477,3 +477,55 @@ class KSPFinalityResult(BaseModel):
     unknown_audit: list[UnknownAuditFinding] = Field(default_factory=list)
     compaction_text: str = ""
     downgrade_reason: Optional[str] = None
+
+
+# ---------------------------------------------------------------------------
+# Idempotency Ledger  (core/idempotency_ledger.py)
+#
+# Not one of the eight governance documents' own concepts — a genuinely
+# infrastructural one that only became necessary once core.capability_broker
+# started calling real external APIs (CLAUDE.md Section 8; README gap-list
+# item 9). Between "the call was made" and "the digest recorded it
+# succeeded" there is a window where a crash, a retry, or a re-run of the
+# same turn could cause the same email to send twice or the same calendar
+# event to be created twice. This is deliberately NOT a tier/permission
+# decision — classify_tier() still, and only, decides whether an action may
+# run at all — it's about whether *this specific attempt* has already been
+# made, which is an execution-integrity fact, not a governance one.
+# ---------------------------------------------------------------------------
+
+class LedgerStatus(str, Enum):
+    PENDING = "pending"
+    COMPLETED = "completed"
+    FAILED = "failed"
+
+
+class IdempotentActionRecord(BaseModel):
+    """One row in the idempotency ledger. `idempotency_key` is the value an
+    execution attempt is deduplicated on — supplied by the caller when a
+    stable per-attempt identifier already exists (an AdjudicationRecord.id,
+    an operator-turn id), or, when omitted, a deterministic hash of
+    (tool_name, arguments) via `compute_idempotency_key` below, so that two
+    proposals of the literal same call still collide. A row moves
+    PENDING -> COMPLETED or PENDING -> FAILED exactly once;
+    core.idempotency_ledger.run_idempotent is the only writer."""
+
+    idempotency_key: str
+    tool_name: str
+    arguments: dict = Field(default_factory=dict)
+    status: LedgerStatus = LedgerStatus.PENDING
+    result: Optional[dict] = None
+    error: Optional[str] = None
+    created_at: str = Field(default_factory=_now)
+    updated_at: str = Field(default_factory=_now)
+
+
+def compute_idempotency_key(tool_name: str, arguments: dict) -> str:
+    """Default idempotency key when the caller has no stable per-attempt id
+    of its own to supply. Same construction as `compute_action_hash` above
+    (canonical JSON, sorted keys, sha256) so two calls proposing the exact
+    same tool_name/arguments collide regardless of dict key order — the
+    common case a retry-after-crash or a re-processed turn actually needs
+    protection against."""
+    canonical = json.dumps({"tool_name": tool_name, "arguments": arguments}, sort_keys=True, default=str)
+    return hashlib.sha256(canonical.encode("utf-8")).hexdigest()

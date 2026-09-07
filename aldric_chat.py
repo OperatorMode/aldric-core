@@ -63,7 +63,7 @@ from __future__ import annotations
 import chat  # reuse Governance Stack Mode's DSD discovery + governed session loop rather than duplicating them
 import core.long_term_memory as long_term_memory
 import core.surface_signal as surface_signal
-from core import capability_broker, pa_action_kernel
+from core import capability_broker, idempotency_ledger, pa_action_kernel
 from llm.aldric_reply import CasualTurnResult, run_casual_turn
 from models.schemas import (
     PERMANENT_TIER_C_CATEGORIES,
@@ -180,7 +180,17 @@ def _execute_cleared_tool_call(result: CasualTurnResult) -> None:
     log what happened, never to re-decide whether it's allowed to. The
     `tier not in (A, B)` branch below is defensive-only — it should be
     unreachable given the above — and fails closed (skips execution, logs
-    why) rather than executing on an assumption."""
+    why) rather than executing on an assumption.
+
+    The actual broker call is wrapped in core.idempotency_ledger.run_idempotent
+    rather than called directly — a separate, execution-integrity concern
+    from the tier gating above (see that module's docstring): it stops a
+    crash-and-retry of this exact turn from sending the same email or
+    creating the same calendar event twice. No idempotency_key is passed
+    explicitly here (ALDRIC Mode's casual turns have no stable per-attempt
+    id to hand it), so it falls back to a content hash of the tool call
+    itself — still dedupes the case this call site actually needs to
+    guard against."""
     if not result.proposed_tool_call:
         return
 
@@ -199,12 +209,20 @@ def _execute_cleared_tool_call(result: CasualTurnResult) -> None:
         arguments = _with_pa_signature(tool_name, arguments)
 
     try:
-        outcome = capability_broker.execute_action(tool_name, arguments)
+        outcome = idempotency_ledger.run_idempotent(
+            tool_name, arguments, capability_broker.execute_action,
+        )
     except capability_broker.CapabilityBrokerError as exc:
         pa_action_kernel.log_digest_entry("executed_action", {
             "tool": tool_name, "tier": tier.value, "status": "failed", "error": str(exc),
         })
         print(f"\n[ALDRIC] That action ({tool_name}) failed to actually run: {exc}")
+        return
+    except (idempotency_ledger.AlreadyInFlightError, idempotency_ledger.ActionAlreadyFailedError) as exc:
+        pa_action_kernel.log_digest_entry("executed_action", {
+            "tool": tool_name, "tier": tier.value, "status": "skipped", "reason": str(exc),
+        })
+        print(f"\n[ALDRIC] Not running {tool_name} again — {exc}")
         return
 
     pa_action_kernel.log_digest_entry("executed_action", {

@@ -17,6 +17,7 @@ adding a new write path.
 """
 from __future__ import annotations
 
+import datetime as dt
 import json
 import os
 import sqlite3
@@ -26,6 +27,10 @@ from typing import Iterator
 from storage import _supabase
 
 DEFAULT_DB_PATH = os.path.join(os.path.dirname(__file__), "aldric.db")
+
+
+def _now_iso() -> str:
+    return dt.datetime.now(dt.timezone.utc).isoformat()
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS dsds (
@@ -84,6 +89,23 @@ CREATE TABLE IF NOT EXISTS long_term_facts (
     scope TEXT NOT NULL,
     data TEXT NOT NULL,
     created_at TEXT NOT NULL
+);
+
+-- Idempotency ledger (see models.schemas.IdempotentActionRecord and
+-- core/idempotency_ledger.py). idempotency_key is the primary key on
+-- purpose: claim_idempotency_key()'s plain INSERT relies on the UNIQUE
+-- constraint it implies to make "who gets to execute" a race-free decision
+-- rather than a SELECT-then-INSERT that could double-claim under
+-- concurrency. Not mirrored to Supabase's schema automatically the way the
+-- other tables above are provisioned there — see claim_idempotency_key's
+-- docstring for what the Supabase path assumes exists.
+CREATE TABLE IF NOT EXISTS idempotent_actions (
+    idempotency_key TEXT PRIMARY KEY,
+    tool_name TEXT NOT NULL,
+    status TEXT NOT NULL,
+    data TEXT NOT NULL,
+    created_at TEXT NOT NULL,
+    updated_at TEXT NOT NULL
 );
 """
 
@@ -348,4 +370,156 @@ def list_facts(scope: str | None = None, db_path: str = DEFAULT_DB_PATH) -> list
             ).fetchall()
         else:
             rows = conn.execute("SELECT data FROM long_term_facts ORDER BY created_at").fetchall()
+        return [json.loads(r[0]) for r in rows]
+
+
+# --- Idempotency ledger (core/idempotency_ledger.py) -----------------------
+
+def _looks_like_unique_violation(exc: Exception) -> bool:
+    """Best-effort cross-backend check. sqlite3 raises its own
+    IntegrityError type (checked directly, not via this function — see
+    claim_idempotency_key below); this exists only for the Supabase/
+    postgrest path, where the client library doesn't give a stable
+    exception type to catch. Matching on message text is honestly a
+    heuristic, not a guarantee — documented here rather than pretended
+    otherwise (CLAUDE.md Section 5)."""
+    message = str(exc).lower()
+    return "duplicate" in message or "unique" in message or "23505" in message
+
+
+def claim_idempotency_key(record, allow_reclaim_failed: bool = False, db_path: str = DEFAULT_DB_PATH) -> bool:
+    """Atomically claim `record.idempotency_key` as PENDING. Returns True
+    if THIS call now owns execution of that key, False if it does not.
+
+    The claim is a plain INSERT, not a SELECT-then-INSERT: the row's
+    PRIMARY KEY constraint is what makes "who gets to execute" a race-free
+    decision rather than a check-then-act window a concurrent caller could
+    slip through. When `allow_reclaim_failed` is set, a second path is also
+    allowed to succeed: overwriting an existing row, but ONLY when its
+    current status is 'failed' — a caller opting into an explicit retry.
+    It never overwrites a 'pending' or 'completed' row under any
+    circumstance; that's the actual guarantee against a double execution."""
+    if _supabase.is_configured():
+        client = _supabase.get_client()
+        payload = {
+            "idempotency_key": record.idempotency_key,
+            "tool_name": record.tool_name,
+            "status": record.status.value,
+            "data": json.loads(record.model_dump_json()),
+            "created_at": record.created_at,
+            "updated_at": record.updated_at,
+        }
+        try:
+            client.table("idempotent_actions").insert(payload).execute()
+            return True
+        except Exception as exc:  # noqa: BLE001 — re-checked below, re-raised if not a dupe
+            if not _looks_like_unique_violation(exc):
+                raise
+            if not allow_reclaim_failed:
+                return False
+            updated = (
+                client.table("idempotent_actions")
+                .update(payload)
+                .eq("idempotency_key", record.idempotency_key)
+                .eq("status", "failed")
+                .execute()
+            )
+            return bool(updated.data)
+    with connect(db_path) as conn:
+        try:
+            conn.execute(
+                "INSERT INTO idempotent_actions (idempotency_key, tool_name, status, data, created_at, updated_at) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (record.idempotency_key, record.tool_name, record.status.value,
+                 record.model_dump_json(), record.created_at, record.updated_at),
+            )
+            return True
+        except sqlite3.IntegrityError:
+            if not allow_reclaim_failed:
+                return False
+            cur = conn.execute(
+                "UPDATE idempotent_actions SET status = ?, data = ?, created_at = ?, updated_at = ? "
+                "WHERE idempotency_key = ? AND status = 'failed'",
+                (record.status.value, record.model_dump_json(), record.created_at, record.updated_at,
+                 record.idempotency_key),
+            )
+            return cur.rowcount > 0
+
+
+def update_idempotent_action_status(
+    idempotency_key: str, status, result: dict | None = None, error: str | None = None,
+    updated_at: str | None = None, db_path: str = DEFAULT_DB_PATH,
+) -> None:
+    """Flip an existing row to COMPLETED or FAILED. No-op if the key isn't
+    in the ledger at all (defensive only — run_idempotent always claims a
+    row before calling this, so that should not happen in practice)."""
+    updated_at = updated_at or _now_iso()
+    status_value = status.value if hasattr(status, "value") else status
+    if _supabase.is_configured():
+        current = get_idempotent_action(idempotency_key, db_path=db_path)
+        if current is None:
+            return
+        current["status"] = status_value
+        current["result"] = result
+        current["error"] = error
+        current["updated_at"] = updated_at
+        _supabase.get_client().table("idempotent_actions").update(
+            {"status": status_value, "data": current, "updated_at": updated_at}
+        ).eq("idempotency_key", idempotency_key).execute()
+        return
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT data FROM idempotent_actions WHERE idempotency_key = ?", (idempotency_key,)
+        ).fetchone()
+        if row is None:
+            return
+        data = json.loads(row[0])
+        data["status"] = status_value
+        data["result"] = result
+        data["error"] = error
+        data["updated_at"] = updated_at
+        conn.execute(
+            "UPDATE idempotent_actions SET status = ?, data = ?, updated_at = ? WHERE idempotency_key = ?",
+            (status_value, json.dumps(data, default=str), updated_at, idempotency_key),
+        )
+
+
+def get_idempotent_action(idempotency_key: str, db_path: str = DEFAULT_DB_PATH) -> dict | None:
+    if _supabase.is_configured():
+        rows = (
+            _supabase.get_client()
+            .table("idempotent_actions")
+            .select("data")
+            .eq("idempotency_key", idempotency_key)
+            .execute()
+            .data
+        )
+        return rows[0]["data"] if rows else None
+    with connect(db_path) as conn:
+        row = conn.execute(
+            "SELECT data FROM idempotent_actions WHERE idempotency_key = ?", (idempotency_key,)
+        ).fetchone()
+        return json.loads(row[0]) if row else None
+
+
+def list_pending_idempotent_actions(db_path: str = DEFAULT_DB_PATH) -> list[dict]:
+    """Startup/health-check recovery path — see
+    core.idempotency_ledger.list_stuck_pending_actions, which is the
+    intended caller. Deliberately returns every PENDING row rather than
+    pre-filtering by age; age-based "is this actually stuck" judgment lives
+    in that caller, not here."""
+    if _supabase.is_configured():
+        rows = (
+            _supabase.get_client()
+            .table("idempotent_actions")
+            .select("data")
+            .eq("status", "pending")
+            .execute()
+            .data
+        )
+        return [r["data"] for r in rows]
+    with connect(db_path) as conn:
+        rows = conn.execute(
+            "SELECT data FROM idempotent_actions WHERE status = 'pending' ORDER BY created_at"
+        ).fetchall()
         return [json.loads(r[0]) for r in rows]
